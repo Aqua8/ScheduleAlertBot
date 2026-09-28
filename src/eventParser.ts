@@ -25,9 +25,36 @@ function todayContext(): { dateKey: string; weekday: string; tz: string } {
 }
 
 /**
+ * claude CLI 호출이 실패했을 때, 사용량 한도/rate limit/서버 과부하 같은 흔한 원인이면
+ * 원인을 바로 알 수 있는 한국어 메시지로 바꿔준다 (Claude Code 공식 에러 문구 기준).
+ * 해당 없으면 원본 메시지를 그대로 보여준다. Discord 명령어 핸들러가 이 메시지를 그대로 응답한다.
+ */
+function describeClaudeFailure(raw: string): string {
+  const lower = raw.toLowerCase();
+  const guide = " (잠시 후 다시 시도하거나, Google 캘린더 앱에서 직접 처리해주세요)";
+
+  if (/(usage limit|hit your .*limit|limit reached)/.test(lower)) {
+    return `Claude 사용량 한도에 도달해서 자연어 명령을 처리할 수 없습니다.${guide}`;
+  }
+  if (/(429|rate limit|rejected)/.test(lower)) {
+    return `요청이 몰려 일시적으로 제한됐습니다(rate limit).${guide}`;
+  }
+  if (/(529|overloaded|high load|high demand)/.test(lower)) {
+    return `Claude 서버가 일시적으로 과부하 상태입니다.${guide}`;
+  }
+  if (/(spend limit|credit balance)/.test(lower)) {
+    return `Claude 결제/크레딧 한도 문제로 처리할 수 없습니다.${guide}`;
+  }
+  return `자연어 처리에 실패했습니다: ${raw}${guide}`;
+}
+
+/**
  * `claude` CLI를 비대화형으로 호출해 자연어를 구조화된 JSON으로 변환한다.
  * 별도 Anthropic API 키 없이, 로그인된 Claude 구독 계정을 그대로 사용한다.
  * `--tools ""`로 코드 실행 등 모든 도구를 꺼서 순수 텍스트 추출만 하도록 제한한다.
+ *
+ * 이 함수가 실패해도(사용량 한도 등) 호출하는 쪽(discord.ts의 각 명령어 핸들러)이 try/catch로
+ * 감싸 에러 메시지만 응답하므로, 06:00 발송·폴링·날씨 같은 다른 기능에는 영향을 주지 않는다.
  */
 async function callClaudeJson<T>(
   systemPrompt: string,
@@ -54,12 +81,12 @@ async function callClaudeJson<T>(
       { timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
     ));
   } catch (err) {
-    throw new Error(`claude 명령 실행에 실패했습니다: ${(err as Error).message}`);
+    throw new Error(describeClaudeFailure((err as Error).message));
   }
 
   const parsed = JSON.parse(stdout);
   if (parsed.is_error || !parsed.structured_output) {
-    throw new Error(`문장 해석에 실패했습니다: ${parsed.result ?? "알 수 없는 오류"}`);
+    throw new Error(describeClaudeFailure(parsed.result ?? "알 수 없는 오류"));
   }
   return schema.parse(parsed.structured_output);
 }
