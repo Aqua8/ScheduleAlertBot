@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hwp.schedulealertbot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/hwp/.nvm/versions/node/v24.13.0/bin/node</string>
+        <string>/Users/hwp/Desktop/Development/ScheduleAlertBot/node_modules/tsx/dist/cli.mjs</string>
+        <string>/Users/hwp/Desktop/Development/ScheduleAlertBot/src/index.ts</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hwp/Desktop/Development/ScheduleAlertBot</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/hwp/Desktop/Development/ScheduleAlertBot/data/out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/hwp/Desktop/Development/ScheduleAlertBot/data/error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/hwp/.nvm/versions/node/v24.13.0/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,30 @@
+{
+  "name": "schedule-alert-bot",
+  "version": "1.0.0",
+  "description": "Google Calendar 오늘 일정을 Discord(및 추후 카카오톡)로 알려주는 개인용 봇",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.13.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "auth:google": "tsx scripts/auth-google.ts",
+    "register-commands": "tsx scripts/register-commands.ts",
+    "send-test": "tsx scripts/send-test.ts"
+  },
+  "dependencies": {
+    "croner": "^9.0.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "googleapis": "^144.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
