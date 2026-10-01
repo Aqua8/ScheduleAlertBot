@@ -165,6 +165,36 @@ export async function getTodayEvents(now = new Date()): Promise<CalendarEvent[]>
   return listEvents(timeMin, timeMax);
 }
 
+export interface TaskItem {
+  id: string;
+  title: string;
+}
+
+/** 오늘이 마감일인 미완료 할 일을 모든 할 일 목록에서 모아 조회한다. (tasks.readonly 권한 필요) */
+export async function getTodayTasks(now = new Date()): Promise<TaskItem[]> {
+  const { dateKey } = getTodayRange(now);
+  const auth = await getOAuthClient();
+  const tasksApi = google.tasks({ version: "v1", auth });
+
+  const lists = await tasksApi.tasklists.list({ maxResults: 100 });
+  const result: TaskItem[] = [];
+  for (const list of lists.data.items ?? []) {
+    const res = await tasksApi.tasks.list({
+      tasklist: list.id!,
+      showCompleted: false,
+      // Tasks API의 마감일은 시간 정보 없이 날짜만 의미가 있고 UTC 자정으로 저장된다.
+      dueMin: `${dateKey}T00:00:00.000Z`,
+      dueMax: `${addDaysToDateKey(dateKey, 1)}T00:00:00.000Z`,
+      maxResults: 100,
+    });
+    for (const t of res.data.items ?? []) {
+      if (t.status === "completed") continue;
+      result.push({ id: t.id ?? "", title: t.title || "(제목 없음)" });
+    }
+  }
+  return result;
+}
+
 export interface NewEventInput {
   title: string;
   /** YYYY-MM-DD */

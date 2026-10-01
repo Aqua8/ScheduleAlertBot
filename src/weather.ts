@@ -14,6 +14,40 @@ interface ForecastItem {
   fcstValue: string;
 }
 
+export interface PrecipitationPeriod {
+  /** 비, 눈, 비/눈, 소나기 */
+  label: string;
+  /** "HH:MM" */
+  start: string;
+  /** "HH:MM" — 마지막 예보 시각의 1시간 뒤 */
+  end: string;
+}
+
+// PTY(강수형태) 코드 → 표시 이름. 0(없음)은 포함하지 않는다.
+const PTY_LABELS: Record<number, string> = { 1: "비", 2: "비/눈", 3: "눈", 4: "소나기" };
+
+/** 시간대별 강수형태(PTY) 예보를 연속된 구간으로 묶는다. 예보는 1시간 간격이라 마지막 시각 +1시간을 종료로 본다. */
+function buildPrecipitationPeriods(todays: ForecastItem[]): PrecipitationPeriod[] {
+  const hours = todays
+    .filter((it) => it.category === "PTY" && Number(it.fcstValue) !== 0)
+    .map((it) => ({ hour: Number(it.fcstTime.slice(0, 2)), label: PTY_LABELS[Number(it.fcstValue)] ?? "강수" }))
+    .sort((a, b) => a.hour - b.hour);
+
+  const periods: { startHour: number; endHour: number; labels: Set<string> }[] = [];
+  for (const { hour, label } of hours) {
+    const last = periods[periods.length - 1];
+    if (last && hour === last.endHour) {
+      last.endHour = hour + 1;
+      last.labels.add(label);
+    } else {
+      periods.push({ startHour: hour, endHour: hour + 1, labels: new Set([label]) });
+    }
+  }
+
+  const hh = (h: number) => `${String(h).padStart(2, "0")}:00`;
+  return periods.map((p) => ({ label: [...p.labels].join("/"), start: hh(p.startHour), end: hh(p.endHour) }));
+}
+
 export interface WeatherSummary {
   /** 섭씨. 정보가 없으면 null */
   minTemp: number | null;
@@ -22,6 +56,8 @@ export interface WeatherSummary {
   maxPop: number;
   /** 오늘 시간대 중 실제 강수/강설 예보(PTY != 0)가 하나라도 있는지 */
   hasPrecipitation: boolean;
+  /** 비/눈이 오는 시간대 (연속된 시간끼리 묶음). 없으면 빈 배열 */
+  precipitationPeriods: PrecipitationPeriod[];
   /** 우산을 챙기는 게 좋은지 */
   umbrella: boolean;
   /** 빨래를 널어도 좋은지 */
@@ -125,6 +161,7 @@ export async function getTodayWeather(): Promise<WeatherSummary> {
     maxTemp,
     maxPop,
     hasPrecipitation,
+    precipitationPeriods: buildPrecipitationPeriods(todays),
     // 강수 예보가 있거나 강수확률이 기준(기본 50%) 이상이면 우산을 챙기라고 안내한다.
     umbrella: hasPrecipitation || maxPop >= config.UMBRELLA_POP_THRESHOLD,
     // 강수 예보가 없고 강수확률이 기준(기본 30%) 미만일 때만 빨래를 널어도 된다고 안내한다.

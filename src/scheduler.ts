@@ -4,7 +4,7 @@
 // 그 외에 "앱이 06:00을 지나서 켜졌을 때" 발송을 놓치지 않도록 하는 캐치업 로직도 여기 있다.
 import { Cron } from "croner";
 import { loadConfig } from "./config.js";
-import { getTodayEvents, getTodayRange } from "./calendar.js";
+import { getTodayEvents, getTodayRange, getTodayTasks, type TaskItem } from "./calendar.js";
 import { hashEvents, loadState, saveState, type DailyState } from "./state.js";
 import { discordNotifier } from "./notifiers/discord.js";
 import type { Notifier } from "./notifiers/types.js";
@@ -24,6 +24,16 @@ async function fetchWeatherSafely(): Promise<WeatherSummary | undefined> {
   }
 }
 
+/** 할 일 조회 실패(권한 미승인 등)도 발송을 막지 않는다. 할 일 없이 진행한다. */
+async function fetchTasksSafely(): Promise<TaskItem[] | undefined> {
+  try {
+    return await getTodayTasks();
+  } catch (err) {
+    console.warn("[tasks] 조회 실패, 할 일 없이 발송합니다:", (err as Error).message);
+    return undefined;
+  }
+}
+
 /** 06:00 발송(또는 캐치업)을 실제로 수행한다: 오늘 일정+날씨를 가져와 모든 notifier로 보내고, 그 결과를 상태로 저장한다. */
 async function runDailySend(): Promise<void> {
   const { dateKey } = getTodayRange();
@@ -31,7 +41,8 @@ async function runDailySend(): Promise<void> {
 
   const events = await getTodayEvents();
   const weather = await fetchWeatherSafely();
-  const summary = { dateKey, events };
+  const tasks = await fetchTasksSafely();
+  const summary = { dateKey, events, tasks };
   const hash = hashEvents(events);
 
   let discordMessageId: string | undefined;

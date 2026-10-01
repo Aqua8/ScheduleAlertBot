@@ -29,7 +29,7 @@ import {
 import type { Notifier } from "./types.js";
 import type { DailySummary } from "../format.js";
 import type { WeatherSummary } from "../weather.js";
-import { getTodayEvents, createEvent, updateEvent, deleteEvent, listEvents, dateRangeToISO, addDaysToDateKey } from "../calendar.js";
+import { getTodayEvents, getTodayTasks, createEvent, updateEvent, deleteEvent, listEvents, dateRangeToISO, addDaysToDateKey } from "../calendar.js";
 import { getTodayRange } from "../calendar.js";
 import { parseEventText, parseEventUpdate, parseSearchIntent } from "../eventParser.js";
 import { findMatchingEvents } from "../eventSearch.js";
@@ -80,8 +80,9 @@ async function handleTodayCommand(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   try {
     const events = await getTodayEvents();
+    const tasks = await getTodayTasks().catch(() => undefined); // 권한 미승인 시 할 일 없이 표시
     const { dateKey } = getTodayRange();
-    const text = formatDailySummary({ dateKey, events });
+    const text = formatDailySummary({ dateKey, events, tasks });
     await interaction.editReply(text);
   } catch (err) {
     await interaction.editReply(`일정을 불러오지 못했습니다: ${(err as Error).message}`);
