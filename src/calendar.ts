@@ -165,6 +165,91 @@ export async function getTodayEvents(now = new Date()): Promise<CalendarEvent[]>
   return listEvents(timeMin, timeMax);
 }
 
+export interface TaskItem {
+  id: string;
+  title: string;
+  tasklistId: string;
+  /** YYYY-MM-DD. 마감일이 없으면 undefined */
+  due?: string;
+}
+
+export interface NewTaskInput {
+  title: string;
+  /** YYYY-MM-DD, 마감일 없으면 null */
+  date?: string | null;
+}
+
+/** 인증된 Tasks API v1 클라이언트. 할 일 조회/등록/수정/삭제 함수들이 공통으로 사용한다. */
+async function getTasksClient() {
+  const auth = await getOAuthClient();
+  return google.tasks({ version: "v1", auth });
+}
+
+/** Tasks API의 마감일은 시간 정보 없이 날짜만 의미가 있고 UTC 자정으로 저장된다. */
+function dateKeyToTaskDue(dateKey: string): string {
+  return `${dateKey}T00:00:00.000Z`;
+}
+
+/** 모든 할 일 목록의 미완료 할 일을 조회한다. dueRange를 주면 마감일이 그 범위(포함)인 것만 가져온다. (tasks 권한 필요) */
+export async function listTasks(dueRange?: { dateFrom: string; dateTo: string }): Promise<TaskItem[]> {
+  const tasksApi = await getTasksClient();
+
+  const lists = await tasksApi.tasklists.list({ maxResults: 100 });
+  const result: TaskItem[] = [];
+  for (const list of lists.data.items ?? []) {
+    const res = await tasksApi.tasks.list({
+      tasklist: list.id!,
+      showCompleted: false,
+      dueMin: dueRange ? dateKeyToTaskDue(dueRange.dateFrom) : undefined,
+      dueMax: dueRange ? dateKeyToTaskDue(addDaysToDateKey(dueRange.dateTo, 1)) : undefined,
+      maxResults: 100,
+    });
+    for (const t of res.data.items ?? []) {
+      if (t.status === "completed") continue;
+      result.push({
+        id: t.id ?? "",
+        title: t.title || "(제목 없음)",
+        tasklistId: list.id!,
+        due: t.due?.slice(0, 10),
+      });
+    }
+  }
+  return result;
+}
+
+/** 오늘이 마감일인 미완료 할 일을 조회한다. */
+export async function getTodayTasks(now = new Date()): Promise<TaskItem[]> {
+  const { dateKey } = getTodayRange(now);
+  return listTasks({ dateFrom: dateKey, dateTo: dateKey });
+}
+
+/** 기본 할 일 목록에 새 할 일을 등록한다. */
+export async function createTask(input: NewTaskInput): Promise<TaskItem> {
+  const tasksApi = await getTasksClient();
+  const res = await tasksApi.tasks.insert({
+    tasklist: "@default",
+    requestBody: { title: input.title, due: input.date ? dateKeyToTaskDue(input.date) : undefined },
+  });
+  return { id: res.data.id ?? "", title: res.data.title ?? input.title, tasklistId: "@default", due: res.data.due?.slice(0, 10) };
+}
+
+/** 기존 할 일의 제목/마감일을 새 내용으로 바꾼다. 마감일이 null이면 마감일을 지운다. */
+export async function updateTask(task: TaskItem, input: NewTaskInput): Promise<TaskItem> {
+  const tasksApi = await getTasksClient();
+  const res = await tasksApi.tasks.patch({
+    tasklist: task.tasklistId,
+    task: task.id,
+    requestBody: { title: input.title, due: input.date ? dateKeyToTaskDue(input.date) : null },
+  });
+  return { id: task.id, title: res.data.title ?? input.title, tasklistId: task.tasklistId, due: res.data.due?.slice(0, 10) };
+}
+
+/** 할 일을 영구 삭제한다. 되돌릴 수 없으므로 호출 전 Discord에서 확인을 받는다. */
+export async function deleteTask(task: TaskItem): Promise<void> {
+  const tasksApi = await getTasksClient();
+  await tasksApi.tasks.delete({ tasklist: task.tasklistId, task: task.id });
+}
+
 export interface NewEventInput {
   title: string;
   /** YYYY-MM-DD */

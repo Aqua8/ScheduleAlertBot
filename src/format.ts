@@ -1,7 +1,7 @@
 // Discord 메시지에 실제로 표시되는 텍스트를 만드는 모듈. 캘린더/날씨 데이터를 사람이 읽기 좋은
 // 형태로 조합하는 역할만 하고, API 호출이나 상태 변경은 하지 않는다(순수 포맷팅 함수 모음).
 import { loadConfig } from "./config.js";
-import type { CalendarEvent } from "./calendar.js";
+import type { CalendarEvent, TaskItem } from "./calendar.js";
 import type { WeatherSummary } from "./weather.js";
 
 const WEEKDAYS_KO = ["일", "월", "화", "수", "목", "금", "토"];
@@ -45,6 +45,8 @@ function eventLine(ev: CalendarEvent, tz: string, marker?: string): string {
 export interface DailySummary {
   dateKey: string;
   events: CalendarEvent[];
+  /** 오늘 마감인 할 일. 조회하지 못했으면 생략 */
+  tasks?: TaskItem[];
 }
 
 /** 오늘 날씨 + 우산/빨래 안내 한 줄 (06:00 발송용, `/오늘날씨` 명령어 공용) */
@@ -56,7 +58,9 @@ export function formatWeatherLine(weather: WeatherSummary): string {
   const icon = weather.hasPrecipitation ? "🌧️" : weather.maxPop >= 50 ? "🌦️" : "🌤️";
   const umbrellaText = weather.umbrella ? "☔ 우산 챙기세요" : "☀️ 우산 필요 없어요";
   const laundryText = weather.laundryOk ? "🧺 빨래 널어도 좋아요" : "🚫 빨래는 다음 기회에";
-  return `${icon} 오늘 날씨: ${tempPart}, 강수확률 최대 ${weather.maxPop}%\n${umbrellaText} · ${laundryText}`;
+  const periods = weather.precipitationPeriods.map((p) => `${p.label} ${p.start}~${p.end}`).join(", ");
+  const periodLine = periods ? `\n${periods}` : "";
+  return `${icon} 오늘 날씨: ${tempPart}, 강수확률 최대 ${weather.maxPop}%${periodLine}\n${umbrellaText} · ${laundryText}`;
 }
 
 /** 06:00 아침 발송용 텍스트 (Discord 메시지 본문 / 콘솔 출력 공용). weather를 주면 상단에 날씨 안내를 덧붙인다. */
@@ -71,8 +75,12 @@ export function formatDailySummary(summary: DailySummary, weather?: WeatherSumma
           "\n",
         );
 
-  if (!weather) return body;
-  return `${formatWeatherLine(weather)}\n\n${body}`;
+  const tasks = summary.tasks ?? [];
+  const withTasks =
+    tasks.length === 0 ? body : `${body}\n\n✅ 오늘 할 일 (${tasks.length})\n${tasks.map((t) => `• ${t.title}`).join("\n")}`;
+
+  if (!weather) return withTasks;
+  return `${formatWeatherLine(weather)}\n\n${withTasks}`;
 }
 
 /**
@@ -114,6 +122,19 @@ export function formatEventBrief(ev: CalendarEvent): string {
   const timeInfo = formatTimeRange(ev, config.TIMEZONE);
   const locationLine = ev.location ? `\n장소: ${ev.location}` : "";
   return `제목: ${ev.title}\n날짜: ${dateInfo}\n시간: ${timeInfo}${locationLine}`;
+}
+
+/** 할 일 하나의 요약 정보 (등록/수정/삭제 확인 메시지 공용) */
+export function formatTaskBrief(task: TaskItem): string {
+  return `제목: ${task.title}\n마감: ${task.due ?? "없음"}`;
+}
+
+/** 여러 후보 할 일 중 하나를 특정해달라고 안내할 때 쓰는 짧은 목록 */
+export function formatTaskCandidates(tasks: TaskItem[]): string {
+  return tasks
+    .slice(0, 10)
+    .map((t) => `- ${t.due ?? "마감 없음"}  ${t.title}`)
+    .join("\n");
 }
 
 /** `/일정목록`용: 기간 내 일정을 날짜별로 묶어서 보여준다. */
