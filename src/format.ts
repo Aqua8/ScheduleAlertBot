@@ -124,6 +124,19 @@ export function formatEventBrief(ev: CalendarEvent): string {
   return `제목: ${ev.title}\n날짜: ${dateInfo}\n시간: ${timeInfo}${locationLine}`;
 }
 
+/** 할 일 하나의 요약 정보 (등록/수정/삭제 확인 메시지 공용) */
+export function formatTaskBrief(task: TaskItem): string {
+  return `제목: ${task.title}\n마감: ${task.due ?? "없음"}`;
+}
+
+/** 여러 후보 할 일 중 하나를 특정해달라고 안내할 때 쓰는 짧은 목록 */
+export function formatTaskCandidates(tasks: TaskItem[]): string {
+  return tasks
+    .slice(0, 10)
+    .map((t) => `- ${t.due ?? "마감 없음"}  ${t.title}`)
+    .join("\n");
+}
+
 /** `/일정목록`용: 기간 내 일정을 날짜별로 묶어서 보여준다. */
 export function formatEventList(dateFrom: string, dateTo: string, events: CalendarEvent[]): string {
   const config = loadConfig();

@@ -11,10 +11,10 @@ const PORT = 53682;
 const REDIRECT_URI = `http://localhost:${PORT}/oauth2callback`;
 // calendar.events: 캘린더 목록/설정은 못 건드리고 일정(이벤트)만 읽고 쓸 수 있는 최소 권한 범위.
 // (/일정추가 명령어로 이벤트를 생성하려면 읽기 전용 권한(calendar.readonly)으로는 부족하다.)
-// tasks.readonly: 오늘 마감인 할 일(Google Tasks)을 읽기 위한 권한.
+// tasks: 할 일(Google Tasks)을 읽고 추가/수정/삭제하기 위한 권한.
 const SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
-  "https://www.googleapis.com/auth/tasks.readonly",
+  "https://www.googleapis.com/auth/tasks",
 ];
 
 const DATA_DIR = new URL("../data/", import.meta.url);

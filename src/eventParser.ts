@@ -4,12 +4,13 @@
 //   1) parseEventText   — "다음주 화요일 2시 치과" → 일정 등록용 구조화 정보
 //   2) parseEventUpdate — 기존 일정 + "3시로 변경" 같은 변경 요청 → 수정 후 최종 상태
 //   3) parseSearchIntent — "내일 치과" 같은 검색 설명 → 키워드 + 날짜 범위
+//   4) parseTaskText / parseTaskUpdate — 할 일 등록/수정용 (제목 + 선택적 마감일)
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { loadConfig } from "./config.js";
 import { getTodayRange } from "./calendar.js";
-import type { CalendarEvent } from "./calendar.js";
+import type { CalendarEvent, TaskItem } from "./calendar.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -185,4 +186,44 @@ export async function parseSearchIntent(text: string): Promise<SearchIntent> {
     `오늘 날짜는 ${dateKey}(${weekday})이고 타임존은 ${tz}이다. ` +
     `사용자 문장에서 일정을 찾기 위한 키워드와 날짜 범위를 추출해라.`;
   return callClaudeJson(systemPrompt, SEARCH_JSON_SCHEMA, text, searchIntentSchema);
+}
+
+const parsedTaskSchema = z.object({
+  title: z.string().min(1),
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "날짜는 YYYY-MM-DD 형식이어야 합니다")
+    .nullable()
+    .optional(),
+});
+
+export type ParsedTask = z.infer<typeof parsedTaskSchema>;
+
+const TASK_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string", description: "할 일 제목 (날짜 표현 제외)" },
+    date: { type: ["string", "null"], description: "YYYY-MM-DD 형식의 마감일. 언급이 없으면 null" },
+  },
+  required: ["title"],
+};
+
+/** 자연어 문장을 할 일 정보로 변환한다. (예: "내일까지 보고서 제출") */
+export async function parseTaskText(text: string): Promise<ParsedTask> {
+  const { dateKey, weekday, tz } = todayContext();
+  const systemPrompt =
+    `오늘 날짜는 ${dateKey}(${weekday})이고 타임존은 ${tz}이다. ` +
+    `사용자의 한국어 문장에서 할 일 제목과 마감일을 추출해라. 마감일이 언급되지 않았으면 date를 null로 둬라.`;
+  return callClaudeJson(systemPrompt, TASK_JSON_SCHEMA, text, parsedTaskSchema);
+}
+
+/** 기존 할 일 + 변경 요청 문장을 합쳐 "수정 후 최종 상태"를 만든다. 언급되지 않은 항목은 기존 값을 유지한다. */
+export async function parseTaskUpdate(current: TaskItem, instruction: string): Promise<ParsedTask> {
+  const { dateKey, weekday, tz } = todayContext();
+  const systemPrompt =
+    `오늘 날짜는 ${dateKey}(${weekday})이고 타임존은 ${tz}이다. ` +
+    `기존 할 일: 제목="${current.title}", 마감일=${current.due ?? "없음"}. ` +
+    `사용자의 변경 요청 문장을 반영해 수정 후 최종 할 일 정보를 JSON으로 출력해라. ` +
+    `문장에서 언급되지 않은 항목은 위 기존 값을 그대로 유지하고, 마감일을 없애라고 하면 date를 null로 둬라.`;
+  return callClaudeJson(systemPrompt, TASK_JSON_SCHEMA, instruction, parsedTaskSchema);
 }

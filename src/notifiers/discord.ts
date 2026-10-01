@@ -1,6 +1,6 @@
 // Discord 봇 구현체. 크게 두 역할을 한다:
 //   1) discordNotifier — scheduler.ts가 호출하는 Notifier 구현 (06:00 발송 / 변경 시 메시지 수정)
-//   2) 슬래시 명령어 6종의 핸들러 — 사용자가 직접 캘린더/날씨를 조회·조작할 때 쓰는 대화형 인터페이스
+//   2) 슬래시 명령어 9종의 핸들러 — 사용자가 직접 캘린더/날씨를 조회·조작할 때 쓰는 대화형 인터페이스
 import {
   Client,
   GatewayIntentBits,
@@ -25,14 +25,17 @@ import {
   formatEventList,
   formatEventCandidates,
   formatWeatherLine,
+  formatTaskBrief,
+  formatTaskCandidates,
 } from "../format.js";
 import type { Notifier } from "./types.js";
 import type { DailySummary } from "../format.js";
 import type { WeatherSummary } from "../weather.js";
-import { getTodayEvents, getTodayTasks, createEvent, updateEvent, deleteEvent, listEvents, dateRangeToISO, addDaysToDateKey } from "../calendar.js";
+import { getTodayEvents, getTodayTasks, createTask, updateTask, deleteTask, createEvent, updateEvent, deleteEvent, listEvents, dateRangeToISO, addDaysToDateKey } from "../calendar.js";
 import { getTodayRange } from "../calendar.js";
-import { parseEventText, parseEventUpdate, parseSearchIntent } from "../eventParser.js";
+import { parseEventText, parseEventUpdate, parseSearchIntent, parseTaskText, parseTaskUpdate } from "../eventParser.js";
 import { findMatchingEvents } from "../eventSearch.js";
+import { findMatchingTasks } from "../taskSearch.js";
 import { getTodayWeather } from "../weather.js";
 
 let client: Client | null = null;
@@ -64,6 +67,12 @@ export function startDiscordClient(): Promise<Client> {
         return handleDeleteCommand(interaction);
       case "오늘날씨":
         return handleWeatherCommand(interaction);
+      case "할일추가":
+        return handleAddTaskCommand(interaction);
+      case "할일수정":
+        return handleEditTaskCommand(interaction);
+      case "할일삭제":
+        return handleDeleteTaskCommand(interaction);
     }
   });
 
@@ -212,6 +221,89 @@ async function handleDeleteCommand(interaction: ChatInputCommandInteraction) {
   }
 }
 
+/** `/할일추가` — 자연어 문장을 파싱해 기본 할 일 목록에 바로 등록한다. */
+async function handleAddTaskCommand(interaction: ChatInputCommandInteraction) {
+  const text = interaction.options.getString("내용", true);
+  await interaction.deferReply();
+  try {
+    const parsed = await parseTaskText(text);
+    const created = await createTask(parsed);
+    await interaction.editReply(`✅ 할 일을 등록했습니다\n${formatTaskBrief(created)}`);
+  } catch (err) {
+    await interaction.editReply(`할 일 등록에 실패했습니다: ${(err as Error).message}`);
+  }
+}
+
+/** 자연어로 할 일을 찾는다. 매치가 0개/여러 개면 안내 메시지를 보내고 null을 반환한다. */
+async function findSingleTaskOrReply(interaction: ChatInputCommandInteraction, findText: string) {
+  const matches = await findMatchingTasks(findText);
+  if (matches.length === 0) {
+    await interaction.editReply(`"${findText}"에 해당하는 할 일을 찾지 못했습니다.`);
+    return null;
+  }
+  if (matches.length > 1) {
+    await interaction.editReply(
+      `할 일이 여러 개 찾혔습니다. 더 구체적으로 입력해주세요:\n${formatTaskCandidates(matches)}`,
+    );
+    return null;
+  }
+  return matches[0];
+}
+
+/** `/할일수정` — 찾기 문장으로 할 일을 특정한 뒤, 변경 문장을 반영한 최종 상태로 바꾼다. */
+async function handleEditTaskCommand(interaction: ChatInputCommandInteraction) {
+  const findText = interaction.options.getString("찾기", true);
+  const changeText = interaction.options.getString("변경", true);
+  await interaction.deferReply();
+  try {
+    const target = await findSingleTaskOrReply(interaction, findText);
+    if (!target) return;
+
+    const updatedInput = await parseTaskUpdate(target, changeText);
+    const updated = await updateTask(target, updatedInput);
+    await interaction.editReply(`✏️ 할 일을 수정했습니다\n${formatTaskBrief(updated)}`);
+  } catch (err) {
+    await interaction.editReply(`할 일 수정에 실패했습니다: ${(err as Error).message}`);
+  }
+}
+
+/** `/할일삭제` — 할 일을 특정한 뒤 삭제/취소 버튼으로 한 번 확인받고서야 실제로 삭제한다. */
+async function handleDeleteTaskCommand(interaction: ChatInputCommandInteraction) {
+  const findText = interaction.options.getString("찾기", true);
+  await interaction.deferReply();
+  try {
+    const target = await findSingleTaskOrReply(interaction, findText);
+    if (!target) return;
+
+    const confirmRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId("delete_confirm").setLabel("삭제").setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId("delete_cancel").setLabel("취소").setStyle(ButtonStyle.Secondary),
+    );
+    const reply = await interaction.editReply({
+      content: `다음 할 일을 삭제할까요?\n${formatTaskBrief(target)}`,
+      components: [confirmRow],
+    });
+
+    try {
+      const button = await reply.awaitMessageComponent({
+        componentType: ComponentType.Button,
+        filter: (i) => i.user.id === interaction.user.id,
+        time: 30_000,
+      });
+      if (button.customId === "delete_confirm") {
+        await deleteTask(target);
+        await button.update({ content: `🗑️ 할 일을 삭제했습니다\n${formatTaskBrief(target)}`, components: [] });
+      } else {
+        await button.update({ content: "삭제를 취소했습니다.", components: [] });
+      }
+    } catch {
+      await interaction.editReply({ content: "응답 시간이 초과되어 삭제를 취소했습니다.", components: [] });
+    }
+  } catch (err) {
+    await interaction.editReply(`할 일 삭제 처리에 실패했습니다: ${(err as Error).message}`);
+  }
+}
+
 /** .env 설정(channel/dm)에 따라 06:00 발송·수정 메시지를 보낼 대상 채널(또는 DM)을 가져온다. */
 async function resolveTargetChannel(): Promise<TextChannel | DMChannel> {
   const config = loadConfig();
@@ -295,6 +387,26 @@ export const weatherCommand = new SlashCommandBuilder()
   .setName("오늘날씨")
   .setDescription("오늘 날씨와 우산/빨래 여부를 확인합니다");
 
+export const addTaskCommand = new SlashCommandBuilder()
+  .setName("할일추가")
+  .setDescription("자연어 문장으로 할 일을 추가합니다")
+  .addStringOption((option) =>
+    option.setName("내용").setDescription("예: 내일까지 보고서 제출").setRequired(true),
+  );
+
+export const editTaskCommand = new SlashCommandBuilder()
+  .setName("할일수정")
+  .setDescription("자연어로 기존 할 일을 찾아 수정합니다")
+  .addStringOption((option) => option.setName("찾기").setDescription("예: 보고서").setRequired(true))
+  .addStringOption((option) =>
+    option.setName("변경").setDescription("예: 금요일로 변경, 제목을 보고서 검토로").setRequired(true),
+  );
+
+export const deleteTaskCommand = new SlashCommandBuilder()
+  .setName("할일삭제")
+  .setDescription("자연어로 기존 할 일을 찾아 삭제합니다 (삭제 전 확인)")
+  .addStringOption((option) => option.setName("찾기").setDescription("예: 보고서").setRequired(true));
+
 /** 봇의 슬래시 명령어 목록을 Discord 서버(전역)에 등록한다. `npm run register-commands`로 1회 실행하면 된다. */
 export async function registerCommands(): Promise<void> {
   const config = loadConfig();
@@ -308,6 +420,9 @@ export async function registerCommands(): Promise<void> {
       editCommand.toJSON(),
       deleteCommand.toJSON(),
       weatherCommand.toJSON(),
+      addTaskCommand.toJSON(),
+      editTaskCommand.toJSON(),
+      deleteTaskCommand.toJSON(),
     ],
   });
 }
