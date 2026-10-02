@@ -4,6 +4,7 @@
 //   1) parseEventText   — "다음주 화요일 2시 치과" → 일정 등록용 구조화 정보
 //   2) parseEventUpdate — 기존 일정 + "3시로 변경" 같은 변경 요청 → 수정 후 최종 상태
 //   3) parseSearchIntent — "내일 치과" 같은 검색 설명 → 키워드 + 날짜 범위
+//      (반복 일정이면 recurrence도 함께 뽑아 RRULE로 변환한다)
 //   4) parseTaskText / parseTaskUpdate — 할 일 등록/수정용 (제목 + 선택적 마감일)
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -92,6 +93,24 @@ async function callClaudeJson<T>(
   return schema.parse(parsed.structured_output);
 }
 
+const recurrenceSchema = z.object({
+  freq: z.enum(["DAILY", "WEEKLY", "MONTHLY", "YEARLY"]),
+  interval: z.number().int().min(1).nullable().optional(),
+  byDay: z.array(z.enum(["MO", "TU", "WE", "TH", "FR", "SA", "SU"])).nullable().optional(),
+  count: z.number().int().min(1).nullable().optional(),
+});
+
+type ParsedRecurrence = z.infer<typeof recurrenceSchema>;
+
+/** 구조화된 반복 정보를 Google Calendar가 받는 RRULE 문자열로 조립한다. (LLM이 RRULE을 직접 쓰면 틀리기 쉬워서 코드에서 만든다) */
+export function buildRecurrenceRules(r: ParsedRecurrence): string[] {
+  const parts = [`FREQ=${r.freq}`];
+  if (r.interval && r.interval > 1) parts.push(`INTERVAL=${r.interval}`);
+  if (r.byDay?.length) parts.push(`BYDAY=${r.byDay.join(",")}`);
+  if (r.count) parts.push(`COUNT=${r.count}`);
+  return [`RRULE:${parts.join(";")}`];
+}
+
 const parsedEventSchema = z.object({
   title: z.string().min(1),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "날짜는 YYYY-MM-DD 형식이어야 합니다"),
@@ -107,9 +126,15 @@ const parsedEventSchema = z.object({
     .nullable()
     .optional(),
   location: z.string().nullable().optional(),
+  recurrence: recurrenceSchema.nullable().optional(),
 });
 
-export type ParsedEvent = z.infer<typeof parsedEventSchema>;
+/** 파서가 돌려주는 일정 정보. 반복 규칙은 이미 RRULE 문자열로 변환돼 있어 NewEventInput에 그대로 넘길 수 있다. */
+export type ParsedEvent = Omit<z.infer<typeof parsedEventSchema>, "recurrence"> & { recurrence?: string[] | null };
+
+function withRecurrenceRules(parsed: z.infer<typeof parsedEventSchema>): ParsedEvent {
+  return { ...parsed, recurrence: parsed.recurrence ? buildRecurrenceRules(parsed.recurrence) : null };
+}
 
 const EVENT_JSON_SCHEMA = {
   type: "object",
@@ -120,6 +145,21 @@ const EVENT_JSON_SCHEMA = {
     startTime: { type: ["string", "null"], description: "HH:MM (24시간). allDay면 null" },
     endTime: { type: ["string", "null"], description: "HH:MM (24시간). 명시되지 않았으면 null" },
     location: { type: ["string", "null"], description: "장소. 없으면 null" },
+    recurrence: {
+      type: ["object", "null"],
+      description: "반복 일정일 때만. 반복 표현(매일/매주/격주/매월/매년 등)이 없으면 null",
+      properties: {
+        freq: { type: "string", enum: ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"] },
+        interval: { type: ["integer", "null"], description: "간격. 격주면 2. 기본(매번)이면 null" },
+        byDay: {
+          type: ["array", "null"],
+          items: { type: "string", enum: ["MO", "TU", "WE", "TH", "FR", "SA", "SU"] },
+          description: "반복 요일. 요일 언급이 없으면 null",
+        },
+        count: { type: ["integer", "null"], description: "총 반복 횟수. 언급이 없으면 null(무기한)" },
+      },
+      required: ["freq"],
+    },
   },
   required: ["title", "date", "allDay"],
 };
@@ -130,8 +170,9 @@ export async function parseEventText(text: string): Promise<ParsedEvent> {
   const systemPrompt =
     `오늘 날짜는 ${dateKey}(${weekday})이고 타임존은 ${tz}이다. ` +
     `사용자의 한국어 문장에서 캘린더 일정 정보를 추출해라. ` +
-    `시간이 명시되지 않았으면 allDay를 true로, 종료 시간이 명시되지 않았으면 endTime을 null로 둬라.`;
-  return callClaudeJson(systemPrompt, EVENT_JSON_SCHEMA, text, parsedEventSchema);
+    `시간이 명시되지 않았으면 allDay를 true로, 종료 시간이 명시되지 않았으면 endTime을 null로 둬라. ` +
+    `"매주 화요일"처럼 반복 표현이 있으면 recurrence를 채우고, date는 반복의 첫 번째 날짜(오늘 이후 가장 가까운 해당 요일 등)로 해라. 반복 표현이 없으면 recurrence는 null이다.`;
+  return withRecurrenceRules(await callClaudeJson(systemPrompt, EVENT_JSON_SCHEMA, text, parsedEventSchema));
 }
 
 /** 기존 일정 + 변경 요청 문장을 합쳐 "수정 후 최종 상태"를 만든다. 언급되지 않은 필드는 기존 값을 유지한다. */
@@ -146,8 +187,9 @@ export async function parseEventUpdate(current: CalendarEvent, instruction: stri
     `기존 일정: 제목="${current.title}", 날짜=${currentDate}, 종일=${current.allDay}, ` +
     `시작시간=${currentStartTime ?? "없음"}, 종료시간=${currentEndTime ?? "없음"}, 장소=${current.location ?? "없음"}. ` +
     `사용자의 변경 요청 문장을 반영해 수정 후 최종 일정 정보를 JSON으로 출력해라. ` +
-    `문장에서 언급되지 않은 항목은 위 기존 값을 그대로 유지해라.`;
-  return callClaudeJson(systemPrompt, EVENT_JSON_SCHEMA, instruction, parsedEventSchema);
+    `문장에서 언급되지 않은 항목은 위 기존 값을 그대로 유지해라. ` +
+    `반복 규칙을 바꾸라는 언급이 없으면 recurrence는 반드시 null로 둬라(null은 "기존 반복 유지"를 뜻한다).`;
+  return withRecurrenceRules(await callClaudeJson(systemPrompt, EVENT_JSON_SCHEMA, instruction, parsedEventSchema));
 }
 
 const searchIntentSchema = z.object({

@@ -1,14 +1,26 @@
-// 이 앱의 심장 역할을 하는 모듈. croner로 두 가지 정기 작업을 돌린다:
-//   1) 매일 06:00 — 오늘 일정(+ 날씨)을 처음 발송
+// 이 앱의 심장 역할을 하는 모듈. croner로 세 가지 정기 작업을 돌린다:
+//   1) 매일 06:00 — 오늘 일정(+ 할 일, 날씨)을 처음 발송
 //   2) 5분마다   — 06:00 발송 이후 일정이 바뀌었는지 확인하고, 바뀌었으면 메시지를 갱신
+//   3) 매일 저녁(EVENING_SEND_TIME, 기본 21:00) — 내일 일정/할 일/날씨 미리보기 발송
 // 그 외에 "앱이 06:00을 지나서 켜졌을 때" 발송을 놓치지 않도록 하는 캐치업 로직도 여기 있다.
 import { Cron } from "croner";
 import { loadConfig } from "./config.js";
-import { getTodayEvents, getTodayRange, getTodayTasks, type TaskItem } from "./calendar.js";
+import { formatTomorrowPreview } from "./format.js";
+import {
+  getTodayEvents,
+  getTodayRange,
+  getTodayTasks,
+  getOverdueTasks,
+  getTasksOnDate,
+  listEvents,
+  dateRangeToISO,
+  addDaysToDateKey,
+  type TaskItem,
+} from "./calendar.js";
 import { hashEvents, loadState, saveState, type DailyState } from "./state.js";
 import { discordNotifier } from "./notifiers/discord.js";
 import type { Notifier } from "./notifiers/types.js";
-import { getTodayWeather } from "./weather.js";
+import { getTodayWeather, getTomorrowWeather } from "./weather.js";
 import type { WeatherSummary } from "./weather.js";
 
 const notifiers: Notifier[] = [discordNotifier];
@@ -34,6 +46,16 @@ async function fetchTasksSafely(): Promise<TaskItem[] | undefined> {
   }
 }
 
+/** 보조 정보(밀린 할 일, 내일 날씨 등) 조회 실패는 발송을 막지 않는다. 실패하면 undefined로 돌려 해당 부분만 생략한다. */
+async function safely<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await fn();
+  } catch (err) {
+    console.warn(`[${label}] 조회 실패, 해당 정보 없이 발송합니다:`, (err as Error).message);
+    return undefined;
+  }
+}
+
 /** 06:00 발송(또는 캐치업)을 실제로 수행한다: 오늘 일정+날씨를 가져와 모든 notifier로 보내고, 그 결과를 상태로 저장한다. */
 async function runDailySend(): Promise<void> {
   const { dateKey } = getTodayRange();
@@ -42,7 +64,8 @@ async function runDailySend(): Promise<void> {
   const events = await getTodayEvents();
   const weather = await fetchWeatherSafely();
   const tasks = await fetchTasksSafely();
-  const summary = { dateKey, events, tasks };
+  const overdueTasks = await safely("overdue", () => getOverdueTasks());
+  const summary = { dateKey, events, tasks, overdueTasks };
   const hash = hashEvents(events);
 
   let discordMessageId: string | undefined;
@@ -60,6 +83,23 @@ async function runDailySend(): Promise<void> {
   };
   await saveState(state);
   console.log(`[daily] ${dateKey} 발송 완료 (${events.length}건)`);
+}
+
+/** 저녁 발송: 내일 일정 + 내일 마감 할 일 + 내일 날씨를 보낸다. 일회성이라 상태 저장/캐치업은 하지 않는다. */
+async function runEveningPreview(): Promise<void> {
+  const tomorrow = addDaysToDateKey(getTodayRange().dateKey, 1);
+  console.log(`[evening] ${tomorrow} 내일 미리보기 발송 시작`);
+
+  const { timeMin, timeMax } = dateRangeToISO(tomorrow, tomorrow);
+  const events = await listEvents(timeMin, timeMax);
+  const tasks = await safely("tasks", () => getTasksOnDate(tomorrow));
+  const weather = await safely("weather", () => getTomorrowWeather());
+
+  const text = formatTomorrowPreview({ dateKey: tomorrow, events, tasks }, weather);
+  for (const notifier of notifiers) {
+    await notifier.sendText(text);
+  }
+  console.log(`[evening] ${tomorrow} 발송 완료 (${events.length}건)`);
 }
 
 /** 5분마다 호출되는 폴링 함수. 오늘 일정을 다시 조회해 이전 해시와 비교하고, 달라졌으면만 갱신 발송한다. */
@@ -125,10 +165,16 @@ export async function startScheduler(): Promise<void> {
     runDailySend().catch((err) => console.error("[daily] 실패:", err));
   });
 
+  // 매일 저녁 EVENING_SEND_TIME(HH:MM)에 내일 미리보기
+  const [eveningHour, eveningMinute] = config.EVENING_SEND_TIME.split(":").map(Number);
+  new Cron(`${eveningMinute} ${eveningHour} * * *`, { timezone: config.TIMEZONE }, () => {
+    runEveningPreview().catch((err) => console.error("[evening] 실패:", err));
+  });
+
   // 5분마다 변경 감지 폴링
   new Cron("*/5 * * * *", { timezone: config.TIMEZONE }, () => {
     runPollCheck().catch((err) => console.error("[poll] 실패:", err));
   });
 
-  console.log(`[scheduler] 시작됨 (timezone=${config.TIMEZONE}) — 매일 06:00 발송 + 5분마다 변경 감지`);
+  console.log(`[scheduler] 시작됨 (timezone=${config.TIMEZONE}) — 매일 06:00 / ${config.EVENING_SEND_TIME} 발송 + 5분마다 변경 감지`);
 }

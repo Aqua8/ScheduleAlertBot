@@ -17,6 +17,10 @@ export interface CalendarEvent {
   start: string;
   end: string;
   location?: string;
+  /** 반복 일정의 한 회차이면 원본(반복 규칙을 가진) 일정의 id */
+  recurringEventId?: string;
+  /** 반복 규칙(RRULE). 반복 일정의 원본 일정에만 있다 */
+  recurrence?: string[];
 }
 
 const TOKEN_PATH = fileURLToPath(new URL("google-token.json", DATA_DIR));
@@ -58,6 +62,8 @@ function mapEvent(e: calendar_v3.Schema$Event, fallbackTitle = "(제목 없음)"
     start: (allDay ? e.start?.date : e.start?.dateTime) ?? "",
     end: (allDay ? e.end?.date : e.end?.dateTime) ?? "",
     location: e.location ?? undefined,
+    recurringEventId: e.recurringEventId ?? undefined,
+    recurrence: e.recurrence ?? undefined,
   };
 }
 
@@ -190,8 +196,8 @@ function dateKeyToTaskDue(dateKey: string): string {
   return `${dateKey}T00:00:00.000Z`;
 }
 
-/** 모든 할 일 목록의 미완료 할 일을 조회한다. dueRange를 주면 마감일이 그 범위(포함)인 것만 가져온다. (tasks 권한 필요) */
-export async function listTasks(dueRange?: { dateFrom: string; dateTo: string }): Promise<TaskItem[]> {
+/** 모든 할 일 목록의 미완료 할 일을 조회한다. dueRange를 주면 마감일이 그 범위(포함, 한쪽만 줘도 됨)인 것만 가져온다. (tasks 권한 필요) */
+export async function listTasks(dueRange?: { dateFrom?: string; dateTo?: string }): Promise<TaskItem[]> {
   const tasksApi = await getTasksClient();
 
   const lists = await tasksApi.tasklists.list({ maxResults: 100 });
@@ -200,8 +206,8 @@ export async function listTasks(dueRange?: { dateFrom: string; dateTo: string })
     const res = await tasksApi.tasks.list({
       tasklist: list.id!,
       showCompleted: false,
-      dueMin: dueRange ? dateKeyToTaskDue(dueRange.dateFrom) : undefined,
-      dueMax: dueRange ? dateKeyToTaskDue(addDaysToDateKey(dueRange.dateTo, 1)) : undefined,
+      dueMin: dueRange?.dateFrom ? dateKeyToTaskDue(dueRange.dateFrom) : undefined,
+      dueMax: dueRange?.dateTo ? dateKeyToTaskDue(addDaysToDateKey(dueRange.dateTo, 1)) : undefined,
       maxResults: 100,
     });
     for (const t of res.data.items ?? []) {
@@ -217,10 +223,20 @@ export async function listTasks(dueRange?: { dateFrom: string; dateTo: string })
   return result;
 }
 
+/** 마감일이 해당 날짜(YYYY-MM-DD)인 미완료 할 일을 조회한다. */
+export async function getTasksOnDate(dateKey: string): Promise<TaskItem[]> {
+  return listTasks({ dateFrom: dateKey, dateTo: dateKey });
+}
+
 /** 오늘이 마감일인 미완료 할 일을 조회한다. */
 export async function getTodayTasks(now = new Date()): Promise<TaskItem[]> {
+  return getTasksOnDate(getTodayRange(now).dateKey);
+}
+
+/** 마감일이 오늘보다 이전인(= 밀린) 미완료 할 일을 조회한다. */
+export async function getOverdueTasks(now = new Date()): Promise<TaskItem[]> {
   const { dateKey } = getTodayRange(now);
-  return listTasks({ dateFrom: dateKey, dateTo: dateKey });
+  return listTasks({ dateTo: addDaysToDateKey(dateKey, -1) });
 }
 
 /** 기본 할 일 목록에 새 할 일을 등록한다. */
@@ -244,6 +260,12 @@ export async function updateTask(task: TaskItem, input: NewTaskInput): Promise<T
   return { id: task.id, title: res.data.title ?? input.title, tasklistId: task.tasklistId, due: res.data.due?.slice(0, 10) };
 }
 
+/** 할 일을 완료 처리한다. 완료 기록이 남고 Google Tasks 앱에서 되돌릴 수 있다. */
+export async function completeTask(task: TaskItem): Promise<void> {
+  const tasksApi = await getTasksClient();
+  await tasksApi.tasks.patch({ tasklist: task.tasklistId, task: task.id, requestBody: { status: "completed" } });
+}
+
 /** 할 일을 영구 삭제한다. 되돌릴 수 없으므로 호출 전 Discord에서 확인을 받는다. */
 export async function deleteTask(task: TaskItem): Promise<void> {
   const tasksApi = await getTasksClient();
@@ -260,6 +282,8 @@ export interface NewEventInput {
   /** HH:MM, 없으면 startTime + 1시간 */
   endTime?: string | null;
   location?: string | null;
+  /** RRULE 문자열 목록(예: ["RRULE:FREQ=WEEKLY;BYDAY=TU"]). 없으면 반복하지 않는다 */
+  recurrence?: string[] | null;
 }
 
 /** NewEventInput(파서가 뽑아낸 정보)을 Google Calendar API가 요구하는 요청 본문으로 변환한다. createEvent/updateEvent 공용. */
@@ -268,6 +292,7 @@ function buildEventRequestBody(input: NewEventInput): calendar_v3.Schema$Event {
   const body: calendar_v3.Schema$Event = {
     summary: input.title,
     location: input.location ?? undefined,
+    recurrence: input.recurrence?.length ? input.recurrence : undefined,
   };
 
   if (input.allDay || !input.startTime) {
@@ -279,6 +304,14 @@ function buildEventRequestBody(input: NewEventInput): calendar_v3.Schema$Event {
     body.end = { dateTime: `${input.date}T${endTime}:00`, timeZone: config.TIMEZONE };
   }
   return body;
+}
+
+/** 일정 하나를 id로 조회한다. 반복 일정 회차에서 원본 일정을 가져올 때 쓴다. */
+export async function getEvent(eventId: string): Promise<CalendarEvent> {
+  const config = loadConfig();
+  const calendar = await getCalendarClient();
+  const res = await calendar.events.get({ calendarId: config.GOOGLE_CALENDAR_ID, eventId });
+  return mapEvent(res.data);
 }
 
 /** 자연어에서 파싱된 정보로 캘린더에 새 일정을 등록한다. (calendar.events 쓰기 권한 필요) */
