@@ -1,6 +1,6 @@
 // Discord 봇 구현체. 크게 두 역할을 한다:
 //   1) discordNotifier — scheduler.ts가 호출하는 Notifier 구현 (06:00 발송 / 변경 시 메시지 수정)
-//   2) 슬래시 명령어 9종의 핸들러 — 사용자가 직접 캘린더/날씨를 조회·조작할 때 쓰는 대화형 인터페이스
+//   2) 슬래시 명령어 10종의 핸들러 — 사용자가 직접 캘린더/날씨를 조회·조작할 때 쓰는 대화형 인터페이스
 import {
   Client,
   GatewayIntentBits,
@@ -31,7 +31,7 @@ import {
 import type { Notifier } from "./types.js";
 import type { DailySummary } from "../format.js";
 import type { WeatherSummary } from "../weather.js";
-import { getTodayEvents, getTodayTasks, createTask, updateTask, deleteTask, createEvent, updateEvent, deleteEvent, listEvents, dateRangeToISO, addDaysToDateKey } from "../calendar.js";
+import { getTodayEvents, getTodayTasks, getOverdueTasks, getEvent, completeTask, createTask, updateTask, deleteTask, createEvent, updateEvent, deleteEvent, listEvents, dateRangeToISO, addDaysToDateKey } from "../calendar.js";
 import { getTodayRange } from "../calendar.js";
 import { parseEventText, parseEventUpdate, parseSearchIntent, parseTaskText, parseTaskUpdate } from "../eventParser.js";
 import { findMatchingEvents } from "../eventSearch.js";
@@ -73,6 +73,8 @@ export function startDiscordClient(): Promise<Client> {
         return handleEditTaskCommand(interaction);
       case "할일삭제":
         return handleDeleteTaskCommand(interaction);
+      case "할일완료":
+        return handleCompleteTaskCommand(interaction);
     }
   });
 
@@ -90,8 +92,9 @@ async function handleTodayCommand(interaction: ChatInputCommandInteraction) {
   try {
     const events = await getTodayEvents();
     const tasks = await getTodayTasks().catch(() => undefined); // 권한 미승인 시 할 일 없이 표시
+    const overdueTasks = await getOverdueTasks().catch(() => undefined);
     const { dateKey } = getTodayRange();
-    const text = formatDailySummary({ dateKey, events, tasks });
+    const text = formatDailySummary({ dateKey, events, tasks, overdueTasks });
     await interaction.editReply(text);
   } catch (err) {
     await interaction.editReply(`일정을 불러오지 못했습니다: ${(err as Error).message}`);
@@ -157,11 +160,32 @@ async function findSingleEventOrReply(
   }
   if (matches.length > 1) {
     await interaction.editReply(
-      `일정이 여러 개 찾혔습니다. 날짜를 더 구체적으로 입력해주세요:\n${formatEventCandidates(matches)}`,
+      `일정이 여러 개 검색되었습니다. 날짜를 더 구체적으로 입력해주세요:\n${formatEventCandidates(matches)}`,
     );
     return null;
   }
   return matches[0];
+}
+
+/** 버튼을 보여주고 명령어를 실행한 본인이 누른 버튼을 반환한다. 30초 안에 누르지 않으면 null. */
+async function askButtons(
+  interaction: ChatInputCommandInteraction,
+  content: string,
+  buttons: { id: string; label: string; style: ButtonStyle }[],
+) {
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    buttons.map((b) => new ButtonBuilder().setCustomId(b.id).setLabel(b.label).setStyle(b.style)),
+  );
+  const reply = await interaction.editReply({ content, components: [row] });
+  try {
+    return await reply.awaitMessageComponent({
+      componentType: ComponentType.Button,
+      filter: (i) => i.user.id === interaction.user.id,
+      time: 30_000,
+    });
+  } catch {
+    return null;
+  }
 }
 
 /** `/일정수정` — 찾기 문장으로 일정을 특정한 뒤, 변경 문장을 반영한 최종 상태로 덮어쓴다. */
@@ -173,10 +197,35 @@ async function handleEditCommand(interaction: ChatInputCommandInteraction) {
     const target = await findSingleEventOrReply(interaction, findText);
     if (!target) return; // 못 찾았거나 여러 개면 이미 안내 메시지를 보냈으므로 여기서 종료.
 
+    // 반복 일정이면 "이번 회차만 / 전체 반복" 중 어디에 적용할지 먼저 묻는다.
+    // 전체 반복은 반복 규칙을 가진 원본 일정을 수정한다(시간 등 변경이 모든 회차에 반영됨).
+    let editTarget = target;
+    let instanceOnly = false;
+    if (target.recurringEventId) {
+      const button = await askButtons(interaction, `반복 일정입니다. 어디까지 수정할까요?\n${formatEventBrief(target)}`, [
+        { id: "scope_instance", label: "이번 회차만", style: ButtonStyle.Primary },
+        { id: "scope_series", label: "전체 반복", style: ButtonStyle.Primary },
+        { id: "scope_cancel", label: "취소", style: ButtonStyle.Secondary },
+      ]);
+      if (!button) {
+        await interaction.editReply({ content: "응답 시간이 초과되어 수정을 취소했습니다.", components: [] });
+        return;
+      }
+      if (button.customId === "scope_cancel") {
+        await button.update({ content: "수정을 취소했습니다.", components: [] });
+        return;
+      }
+      await button.deferUpdate(); // 이후 파싱/수정이 3초를 넘길 수 있어 먼저 응답을 확보한다.
+      if (button.customId === "scope_series") editTarget = await getEvent(target.recurringEventId);
+      else instanceOnly = true;
+    }
+
     // "언급 안 된 필드는 기존 값 유지"한 최종 일정 정보를 만들어 그대로 덮어쓴다.
-    const updatedInput = await parseEventUpdate(target, changeText);
-    const updated = await updateEvent(target.id, updatedInput);
-    await interaction.editReply(`✏️ 일정을 수정했습니다\n${formatEventBrief(updated)}`);
+    const updatedInput = await parseEventUpdate(editTarget, changeText);
+    // 한 회차는 자체 반복 규칙을 가질 수 없고, 전체 반복에서 규칙 변경 언급이 없으면(null) 기존 규칙을 유지한다.
+    const recurrence = instanceOnly ? undefined : (updatedInput.recurrence ?? editTarget.recurrence);
+    const updated = await updateEvent(editTarget.id, { ...updatedInput, recurrence });
+    await interaction.editReply({ content: `✏️ 일정을 수정했습니다\n${formatEventBrief(updated)}`, components: [] });
   } catch (err) {
     await interaction.editReply(`일정 수정에 실패했습니다: ${(err as Error).message}`);
   }
@@ -189,6 +238,28 @@ async function handleDeleteCommand(interaction: ChatInputCommandInteraction) {
   try {
     const target = await findSingleEventOrReply(interaction, findText);
     if (!target) return;
+
+    // 반복 일정이면 "이번 회차만 / 전체 반복" 삭제 버튼이 곧 확인 절차를 겸한다.
+    if (target.recurringEventId) {
+      const button = await askButtons(interaction, `반복 일정입니다. 어떻게 삭제할까요?\n${formatEventBrief(target)}`, [
+        { id: "scope_instance", label: "이번 회차만 삭제", style: ButtonStyle.Danger },
+        { id: "scope_series", label: "전체 반복 삭제", style: ButtonStyle.Danger },
+        { id: "scope_cancel", label: "취소", style: ButtonStyle.Secondary },
+      ]);
+      if (!button) {
+        await interaction.editReply({ content: "응답 시간이 초과되어 삭제를 취소했습니다.", components: [] });
+      } else if (button.customId === "scope_cancel") {
+        await button.update({ content: "삭제를 취소했습니다.", components: [] });
+      } else {
+        const series = button.customId === "scope_series";
+        await deleteEvent(series ? target.recurringEventId : target.id);
+        await button.update({
+          content: `🗑️ ${series ? "반복 일정 전체를" : "이번 회차를"} 삭제했습니다\n${formatEventBrief(target)}`,
+          components: [],
+        });
+      }
+      return;
+    }
 
     const confirmRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId("delete_confirm").setLabel("삭제").setStyle(ButtonStyle.Danger),
@@ -243,7 +314,7 @@ async function findSingleTaskOrReply(interaction: ChatInputCommandInteraction, f
   }
   if (matches.length > 1) {
     await interaction.editReply(
-      `할 일이 여러 개 찾혔습니다. 더 구체적으로 입력해주세요:\n${formatTaskCandidates(matches)}`,
+      `할 일이 여러 개 검색되었습니다. 더 구체적으로 입력해주세요:\n${formatTaskCandidates(matches)}`,
     );
     return null;
   }
@@ -264,6 +335,21 @@ async function handleEditTaskCommand(interaction: ChatInputCommandInteraction) {
     await interaction.editReply(`✏️ 할 일을 수정했습니다\n${formatTaskBrief(updated)}`);
   } catch (err) {
     await interaction.editReply(`할 일 수정에 실패했습니다: ${(err as Error).message}`);
+  }
+}
+
+/** `/할일완료` — 할 일을 특정해 완료 처리한다. 삭제와 달리 Google Tasks에서 되돌릴 수 있어 확인 절차 없이 바로 처리한다. */
+async function handleCompleteTaskCommand(interaction: ChatInputCommandInteraction) {
+  const findText = interaction.options.getString("찾기", true);
+  await interaction.deferReply();
+  try {
+    const target = await findSingleTaskOrReply(interaction, findText);
+    if (!target) return;
+
+    await completeTask(target);
+    await interaction.editReply(`✅ 할 일을 완료 처리했습니다\n${formatTaskBrief(target)}`);
+  } catch (err) {
+    await interaction.editReply(`할 일 완료 처리에 실패했습니다: ${(err as Error).message}`);
   }
 }
 
@@ -332,6 +418,12 @@ export const discordNotifier: Notifier = {
     return { messageId: message.id };
   },
 
+  /** 저녁 내일 미리보기처럼 수정할 일 없는 일회성 메시지를 발송한다. */
+  async sendText(text: string) {
+    const channel = await resolveTargetChannel();
+    await channel.send(text);
+  },
+
   /** 일정 변경 감지 시 호출. 아침 메시지를 찾아 수정하고, 못 찾으면(삭제 등) 새로 보낸다. */
   async sendUpdate(summary, previousEventIds, context) {
     const channel = await resolveTargetChannel();
@@ -360,7 +452,7 @@ export const addEventCommand = new SlashCommandBuilder()
   .setName("일정추가")
   .setDescription("자연어 문장으로 캘린더에 일정을 추가합니다")
   .addStringOption((option) =>
-    option.setName("내용").setDescription("예: 다음주 화요일 2시 치과").setRequired(true),
+    option.setName("내용").setDescription("예: 다음주 화요일 2시 치과, 매주 화요일 7시 운동").setRequired(true),
   );
 
 export const listCommand = new SlashCommandBuilder()
@@ -407,6 +499,11 @@ export const deleteTaskCommand = new SlashCommandBuilder()
   .setDescription("자연어로 기존 할 일을 찾아 삭제합니다 (삭제 전 확인)")
   .addStringOption((option) => option.setName("찾기").setDescription("예: 보고서").setRequired(true));
 
+export const completeTaskCommand = new SlashCommandBuilder()
+  .setName("할일완료")
+  .setDescription("자연어로 기존 할 일을 찾아 완료 처리합니다")
+  .addStringOption((option) => option.setName("찾기").setDescription("예: 보고서").setRequired(true));
+
 /** 봇의 슬래시 명령어 목록을 Discord 서버(전역)에 등록한다. `npm run register-commands`로 1회 실행하면 된다. */
 export async function registerCommands(): Promise<void> {
   const config = loadConfig();
@@ -423,6 +520,7 @@ export async function registerCommands(): Promise<void> {
       addTaskCommand.toJSON(),
       editTaskCommand.toJSON(),
       deleteTaskCommand.toJSON(),
+      completeTaskCommand.toJSON(),
     ],
   });
 }

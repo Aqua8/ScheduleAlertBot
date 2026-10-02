@@ -8,6 +8,9 @@ export interface Notifier {
   /** 06:00 아침 발송. weather가 있으면 함께 보여준다. 이후 수정에 필요한 참조(예: 메시지 id)를 반환할 수 있다. */
   sendDaily(summary: DailySummary, weather?: WeatherSummary): Promise<{ messageId?: string }>;
 
+  /** 수정/갱신 대상이 아닌 일회성 텍스트 발송 (저녁 내일 미리보기 등). */
+  sendText(text: string): Promise<void>;
+
   /**
    * 오늘 일정 변경 감지 시 호출.
    * Discord처럼 수정이 가능하면 messageId를 이용해 edit, 카카오처럼 불가능하면 전체 재발송.

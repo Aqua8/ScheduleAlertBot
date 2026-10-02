@@ -91,17 +91,8 @@ async function fetchForecastItems(baseDate: string, baseTime: string): Promise<F
   return json.response?.body?.items?.item ?? [];
 }
 
-/** KMA 단기예보는 02/05/08/11/14/17/20/23시에 발표되고 ~10분 뒤 조회 가능해진다. 06시 발송 기준 05시 발표분을 우선 쓰고, 실패하면 이전 발표분으로 넘어간다. */
-async function fetchTodayForecastItems(todayDateKey: string): Promise<ForecastItem[]> {
-  const todayBaseDate = todayDateKey.replace(/-/g, "");
-  const yesterdayBaseDate = addDaysToDateKey(todayDateKey, -1).replace(/-/g, "");
-
-  const attempts: [string, string][] = [
-    [todayBaseDate, "0500"],
-    [todayBaseDate, "0200"],
-    [yesterdayBaseDate, "2300"],
-  ];
-
+/** 발표 시각 후보를 순서대로 시도해 처음 성공한 예보를 쓴다. 전부 실패하면 마지막 오류로 던진다. */
+async function fetchFirstAvailableForecast(attempts: [string, string][]): Promise<ForecastItem[]> {
   let lastError: unknown;
   for (const [baseDate, baseTime] of attempts) {
     try {
@@ -113,15 +104,45 @@ async function fetchTodayForecastItems(todayDateKey: string): Promise<ForecastIt
   throw new Error(`기상청 예보를 가져오지 못했습니다: ${(lastError as Error)?.message ?? "알 수 없는 오류"}`);
 }
 
+/** KMA 단기예보는 02/05/08/11/14/17/20/23시에 발표되고 ~10분 뒤 조회 가능해진다. 06시 발송 기준 05시 발표분을 우선 쓰고, 실패하면 이전 발표분으로 넘어간다. */
+async function fetchTodayForecastItems(todayDateKey: string): Promise<ForecastItem[]> {
+  const todayBaseDate = todayDateKey.replace(/-/g, "");
+  const yesterdayBaseDate = addDaysToDateKey(todayDateKey, -1).replace(/-/g, "");
+
+  return fetchFirstAvailableForecast([
+    [todayBaseDate, "0500"],
+    [todayBaseDate, "0200"],
+    [yesterdayBaseDate, "2300"],
+  ]);
+}
+
+/** 저녁(21시) 발송 기준으로 내일 예보를 담고 있는 오늘 20시 발표분을 우선 쓰고, 실패하면 이전 발표분으로 넘어간다. */
+async function fetchTomorrowForecastItems(todayDateKey: string): Promise<ForecastItem[]> {
+  const todayBaseDate = todayDateKey.replace(/-/g, "");
+  return fetchFirstAvailableForecast([
+    [todayBaseDate, "2000"],
+    [todayBaseDate, "1700"],
+    [todayBaseDate, "1400"],
+  ]);
+}
+
 /** 오늘 하루의 날씨를 요약하고, 우산/빨래 여부를 판단한다. */
 export async function getTodayWeather(): Promise<WeatherSummary> {
-  const config = loadConfig();
   const { dateKey } = getTodayRange();
-  const todayBaseDate = dateKey.replace(/-/g, "");
+  return summarizeDay(await fetchTodayForecastItems(dateKey), dateKey);
+}
 
-  const items = await fetchTodayForecastItems(dateKey);
-  // 응답에는 오늘 이후 며칠치 예보가 섞여 있으므로 오늘 날짜 항목만 남긴다.
-  const todays = items.filter((it) => it.fcstDate === todayBaseDate);
+/** 내일 하루의 날씨를 요약하고, 우산/빨래 여부를 판단한다. */
+export async function getTomorrowWeather(): Promise<WeatherSummary> {
+  const { dateKey } = getTodayRange();
+  return summarizeDay(await fetchTomorrowForecastItems(dateKey), addDaysToDateKey(dateKey, 1));
+}
+
+/** 예보 항목들 중 dateKey 하루치만 골라 기온/강수를 요약하고 우산/빨래 여부를 판단한다. */
+function summarizeDay(items: ForecastItem[], dateKey: string): WeatherSummary {
+  const config = loadConfig();
+  // 응답에는 며칠치 예보가 섞여 있으므로 해당 날짜 항목만 남긴다.
+  const todays = items.filter((it) => it.fcstDate === dateKey.replace(/-/g, ""));
 
   let maxPop = 0;
   let hasPrecipitation = false;

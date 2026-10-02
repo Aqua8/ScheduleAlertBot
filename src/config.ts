@@ -17,6 +17,8 @@ const schema = z.object({
   DISCORD_TARGET_ID: z.string().optional(),
 
   TIMEZONE: z.string().default("Asia/Seoul"),
+  // 내일 일정/할 일/날씨를 미리 보내는 저녁 발송 시각 (HH:MM, 24시간)
+  EVENING_SEND_TIME: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "HH:MM 형식이어야 합니다").default("21:00"),
 
   // 기상청 날씨 정보(우산/빨래 판단). optional로 두고 requireWeatherConfig()에서 검증한다.
   // 키가 없으면 06시 발송 시 날씨 부분만 조용히 건너뛴다.

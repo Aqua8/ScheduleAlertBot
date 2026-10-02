@@ -45,12 +45,21 @@ function eventLine(ev: CalendarEvent, tz: string, marker?: string): string {
 export interface DailySummary {
   dateKey: string;
   events: CalendarEvent[];
-  /** 오늘 마감인 할 일. 조회하지 못했으면 생략 */
+  /** 해당 날짜가 마감인 할 일. 조회하지 못했으면 생략 */
   tasks?: TaskItem[];
+  /** 마감이 지난 미완료 할 일(아침 발송용). 조회하지 못했으면 생략 */
+  overdueTasks?: TaskItem[];
+}
+
+/** "✅ 오늘 할 일 (2)\n• 제목" 형태의 섹션. 비어 있으면 빈 문자열. showDue면 제목 뒤에 마감일을 붙인다. */
+function formatTaskSection(title: string, tasks: TaskItem[], tz: string, showDue = false): string {
+  if (tasks.length === 0) return "";
+  const lines = tasks.map((t) => (showDue && t.due ? `• ${t.title} (마감 ${formatDateHeader(t.due, tz)})` : `• ${t.title}`));
+  return `${title} (${tasks.length})\n${lines.join("\n")}`;
 }
 
 /** 오늘 날씨 + 우산/빨래 안내 한 줄 (06:00 발송용, `/오늘날씨` 명령어 공용) */
-export function formatWeatherLine(weather: WeatherSummary): string {
+export function formatWeatherLine(weather: WeatherSummary, dayLabel = "오늘"): string {
   const tempPart =
     weather.minTemp !== null && weather.maxTemp !== null
       ? `${weather.minTemp}°~${weather.maxTemp}°`
@@ -60,7 +69,7 @@ export function formatWeatherLine(weather: WeatherSummary): string {
   const laundryText = weather.laundryOk ? "🧺 빨래 널어도 좋아요" : "🚫 빨래는 다음 기회에";
   const periods = weather.precipitationPeriods.map((p) => `${p.label} ${p.start}~${p.end}`).join(", ");
   const periodLine = periods ? `\n${periods}` : "";
-  return `${icon} 오늘 날씨: ${tempPart}, 강수확률 최대 ${weather.maxPop}%${periodLine}\n${umbrellaText} · ${laundryText}`;
+  return `${icon} ${dayLabel} 날씨: ${tempPart}, 강수확률 최대 ${weather.maxPop}%${periodLine}\n${umbrellaText} · ${laundryText}`;
 }
 
 /** 06:00 아침 발송용 텍스트 (Discord 메시지 본문 / 콘솔 출력 공용). weather를 주면 상단에 날씨 안내를 덧붙인다. */
@@ -75,12 +84,33 @@ export function formatDailySummary(summary: DailySummary, weather?: WeatherSumma
           "\n",
         );
 
-  const tasks = summary.tasks ?? [];
-  const withTasks =
-    tasks.length === 0 ? body : `${body}\n\n✅ 오늘 할 일 (${tasks.length})\n${tasks.map((t) => `• ${t.title}`).join("\n")}`;
+  const sections = [
+    body,
+    formatTaskSection("✅ 오늘 할 일", summary.tasks ?? [], config.TIMEZONE),
+    formatTaskSection("⚠️ 밀린 할 일", summary.overdueTasks ?? [], config.TIMEZONE, true),
+  ].filter(Boolean);
+  const text = sections.join("\n\n");
 
-  if (!weather) return withTasks;
-  return `${formatWeatherLine(weather)}\n\n${withTasks}`;
+  if (!weather) return text;
+  return `${formatWeatherLine(weather)}\n\n${text}`;
+}
+
+/** 저녁 발송용: 내일 일정 + 내일 마감 할 일 + 내일 날씨. summary.dateKey는 내일 날짜여야 한다. */
+export function formatTomorrowPreview(summary: DailySummary, weather?: WeatherSummary): string {
+  const config = loadConfig();
+  const header = formatDateHeader(summary.dateKey, config.TIMEZONE);
+
+  const body =
+    summary.events.length === 0
+      ? `🌙 ${header} 내일 일정 없음`
+      : [`🌙 ${header} 내일 일정 (${summary.events.length})`, ...summary.events.map((ev) => eventLine(ev, config.TIMEZONE))].join(
+          "\n",
+        );
+
+  const text = [body, formatTaskSection("✅ 내일 마감 할 일", summary.tasks ?? [], config.TIMEZONE)].filter(Boolean).join("\n\n");
+
+  if (!weather) return text;
+  return `${formatWeatherLine(weather, "내일")}\n\n${text}`;
 }
 
 /**
@@ -121,7 +151,8 @@ export function formatEventBrief(ev: CalendarEvent): string {
   const dateInfo = ev.start.slice(0, 10);
   const timeInfo = formatTimeRange(ev, config.TIMEZONE);
   const locationLine = ev.location ? `\n장소: ${ev.location}` : "";
-  return `제목: ${ev.title}\n날짜: ${dateInfo}\n시간: ${timeInfo}${locationLine}`;
+  const recurringLine = ev.recurrence?.length || ev.recurringEventId ? "\n🔁 반복 일정" : "";
+  return `제목: ${ev.title}\n날짜: ${dateInfo}\n시간: ${timeInfo}${locationLine}${recurringLine}`;
 }
 
 /** 할 일 하나의 요약 정보 (등록/수정/삭제 확인 메시지 공용) */
