@@ -110,7 +110,7 @@ function getTimezoneOffsetMinutes(tz: string, date: Date): number {
 }
 
 /** "YYYY-MM-DD" 날짜의, 지정한 타임존 기준 자정(00:00)을 UTC 밀리초로 변환한다. */
-function dateKeyToUtcMs(dateKey: string, tz: string): number {
+export function dateKeyToUtcMs(dateKey: string, tz: string): number {
   const [y, m, d] = dateKey.split("-").map(Number);
   const offsetMinutes = getTimezoneOffsetMinutes(tz, new Date(Date.UTC(y, m - 1, d)));
   return Date.UTC(y, m - 1, d, 0, 0, 0) - offsetMinutes * 60_000;
@@ -312,6 +312,26 @@ export async function getEvent(eventId: string): Promise<CalendarEvent> {
   const calendar = await getCalendarClient();
   const res = await calendar.events.get({ calendarId: config.GOOGLE_CALENDAR_ID, eventId });
   return mapEvent(res.data);
+}
+
+/** 등록하려는 일정과 시간이 겹치는 기존 일정을 찾는다. 종일 일정은 비교하지 않고, 반복 일정은 첫 회차만 확인한다. */
+export async function findConflictingEvents(input: NewEventInput): Promise<CalendarEvent[]> {
+  if (input.allDay || !input.startTime) return [];
+
+  const config = loadConfig();
+  const dayStartMs = dateKeyToUtcMs(input.date, config.TIMEZONE);
+  const toMs = (time: string) => {
+    const [h, m] = time.split(":").map(Number);
+    return dayStartMs + (h * 60 + m) * 60_000;
+  };
+  const startMs = toMs(input.startTime);
+  const endMs = toMs(input.endTime ?? addMinutesToTime(input.startTime, 60));
+
+  const { timeMin, timeMax } = dateRangeToISO(input.date, input.date);
+  const events = await listEvents(timeMin, timeMax);
+  return events.filter(
+    (ev) => !ev.allDay && new Date(ev.start).getTime() < endMs && new Date(ev.end).getTime() > startMs,
+  );
 }
 
 /** 자연어에서 파싱된 정보로 캘린더에 새 일정을 등록한다. (calendar.events 쓰기 권한 필요) */

@@ -1,6 +1,6 @@
 // Discord 봇 구현체. 크게 두 역할을 한다:
 //   1) discordNotifier — scheduler.ts가 호출하는 Notifier 구현 (06:00 발송 / 변경 시 메시지 수정)
-//   2) 슬래시 명령어 10종의 핸들러 — 사용자가 직접 캘린더/날씨를 조회·조작할 때 쓰는 대화형 인터페이스
+//   2) 슬래시 명령어 12종의 핸들러 — 사용자가 직접 캘린더/날씨를 조회·조작할 때 쓰는 대화형 인터페이스
 import {
   Client,
   GatewayIntentBits,
@@ -27,15 +27,17 @@ import {
   formatWeatherLine,
   formatTaskBrief,
   formatTaskCandidates,
+  formatFreeSlots,
 } from "../format.js";
 import type { Notifier } from "./types.js";
 import type { DailySummary } from "../format.js";
 import type { WeatherSummary } from "../weather.js";
-import { getTodayEvents, getTodayTasks, getOverdueTasks, getEvent, completeTask, createTask, updateTask, deleteTask, createEvent, updateEvent, deleteEvent, listEvents, dateRangeToISO, addDaysToDateKey } from "../calendar.js";
+import { getTodayEvents, getTodayTasks, getOverdueTasks, getEvent, findConflictingEvents, completeTask, createTask, updateTask, deleteTask, createEvent, updateEvent, deleteEvent, listEvents, dateRangeToISO, addDaysToDateKey } from "../calendar.js";
 import { getTodayRange } from "../calendar.js";
-import { parseEventText, parseEventUpdate, parseSearchIntent, parseTaskText, parseTaskUpdate } from "../eventParser.js";
+import { parseEventText, parseEventUpdate, parseSearchIntent, parseTaskText, parseTaskUpdate, parseAssistantRequest } from "../eventParser.js";
 import { findMatchingEvents } from "../eventSearch.js";
 import { findMatchingTasks } from "../taskSearch.js";
+import { findFreeSlots, MAX_FREE_TIME_DAYS } from "../freeTime.js";
 import { getTodayWeather } from "../weather.js";
 
 let client: Client | null = null;
@@ -75,6 +77,10 @@ export function startDiscordClient(): Promise<Client> {
         return handleDeleteTaskCommand(interaction);
       case "할일완료":
         return handleCompleteTaskCommand(interaction);
+      case "빈시간":
+        return handleFreeTimeCommand(interaction);
+      case "비서":
+        return handleAssistantCommand(interaction);
     }
   });
 
@@ -115,10 +121,18 @@ async function handleWeatherCommand(interaction: ChatInputCommandInteraction) {
 async function handleAddEventCommand(interaction: ChatInputCommandInteraction) {
   const text = interaction.options.getString("내용", true);
   await interaction.deferReply(); // 등록은 다른 사람도 보게(공개) 응답한다.
+  await runAddEvent(interaction, text);
+}
+
+/** /일정추가 처리 본문. 이미 deferReply 된 interaction에 답한다(`/비서`에서도 재사용). */
+async function runAddEvent(interaction: ChatInputCommandInteraction, text: string) {
   try {
     const parsed = await parseEventText(text);
+    // 겹침 경고는 부가 기능이라, 조회에 실패해도 등록은 그대로 진행한다. 등록하기 전에 조회해야 방금 만든 일정이 섞이지 않는다.
+    const conflicts = await findConflictingEvents(parsed).catch(() => []);
     const created = await createEvent(parsed);
-    await interaction.editReply(`✅ 일정을 등록했습니다\n${formatEventBrief(created)}`);
+    const warning = conflicts.length > 0 ? `\n\n⚠️ 시간이 겹치는 일정이 있어요\n${formatEventCandidates(conflicts)}` : "";
+    await interaction.editReply(`✅ 일정을 등록했습니다\n${formatEventBrief(created)}${warning}`);
   } catch (err) {
     await interaction.editReply(`일정 등록에 실패했습니다: ${(err as Error).message}`);
   }
@@ -128,6 +142,11 @@ async function handleAddEventCommand(interaction: ChatInputCommandInteraction) {
 async function handleListCommand(interaction: ChatInputCommandInteraction) {
   const periodText = interaction.options.getString("기간");
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  await runList(interaction, periodText);
+}
+
+/** /일정목록 처리 본문. 이미 deferReply 된 interaction에 답한다(`/비서`에서도 재사용). */
+async function runList(interaction: ChatInputCommandInteraction, periodText: string | null) {
   try {
     const { dateKey: today } = getTodayRange();
     let dateFrom = today;
@@ -193,6 +212,11 @@ async function handleEditCommand(interaction: ChatInputCommandInteraction) {
   const findText = interaction.options.getString("찾기", true);
   const changeText = interaction.options.getString("변경", true);
   await interaction.deferReply();
+  await runEditEvent(interaction, findText, changeText);
+}
+
+/** /일정수정 처리 본문. 이미 deferReply 된 interaction에 답한다(`/비서`에서도 재사용). */
+async function runEditEvent(interaction: ChatInputCommandInteraction, findText: string, changeText: string) {
   try {
     const target = await findSingleEventOrReply(interaction, findText);
     if (!target) return; // 못 찾았거나 여러 개면 이미 안내 메시지를 보냈으므로 여기서 종료.
@@ -235,6 +259,11 @@ async function handleEditCommand(interaction: ChatInputCommandInteraction) {
 async function handleDeleteCommand(interaction: ChatInputCommandInteraction) {
   const findText = interaction.options.getString("찾기", true);
   await interaction.deferReply();
+  await runDeleteEvent(interaction, findText);
+}
+
+/** /일정삭제 처리 본문. 이미 deferReply 된 interaction에 답한다(`/비서`에서도 재사용). */
+async function runDeleteEvent(interaction: ChatInputCommandInteraction, findText: string) {
   try {
     const target = await findSingleEventOrReply(interaction, findText);
     if (!target) return;
@@ -296,6 +325,11 @@ async function handleDeleteCommand(interaction: ChatInputCommandInteraction) {
 async function handleAddTaskCommand(interaction: ChatInputCommandInteraction) {
   const text = interaction.options.getString("내용", true);
   await interaction.deferReply();
+  await runAddTask(interaction, text);
+}
+
+/** /할일추가 처리 본문. 이미 deferReply 된 interaction에 답한다(`/비서`에서도 재사용). */
+async function runAddTask(interaction: ChatInputCommandInteraction, text: string) {
   try {
     const parsed = await parseTaskText(text);
     const created = await createTask(parsed);
@@ -326,6 +360,11 @@ async function handleEditTaskCommand(interaction: ChatInputCommandInteraction) {
   const findText = interaction.options.getString("찾기", true);
   const changeText = interaction.options.getString("변경", true);
   await interaction.deferReply();
+  await runEditTask(interaction, findText, changeText);
+}
+
+/** /할일수정 처리 본문. 이미 deferReply 된 interaction에 답한다(`/비서`에서도 재사용). */
+async function runEditTask(interaction: ChatInputCommandInteraction, findText: string, changeText: string) {
   try {
     const target = await findSingleTaskOrReply(interaction, findText);
     if (!target) return;
@@ -342,6 +381,11 @@ async function handleEditTaskCommand(interaction: ChatInputCommandInteraction) {
 async function handleCompleteTaskCommand(interaction: ChatInputCommandInteraction) {
   const findText = interaction.options.getString("찾기", true);
   await interaction.deferReply();
+  await runCompleteTask(interaction, findText);
+}
+
+/** /할일완료 처리 본문. 이미 deferReply 된 interaction에 답한다(`/비서`에서도 재사용). */
+async function runCompleteTask(interaction: ChatInputCommandInteraction, findText: string) {
   try {
     const target = await findSingleTaskOrReply(interaction, findText);
     if (!target) return;
@@ -357,6 +401,11 @@ async function handleCompleteTaskCommand(interaction: ChatInputCommandInteractio
 async function handleDeleteTaskCommand(interaction: ChatInputCommandInteraction) {
   const findText = interaction.options.getString("찾기", true);
   await interaction.deferReply();
+  await runDeleteTask(interaction, findText);
+}
+
+/** /할일삭제 처리 본문. 이미 deferReply 된 interaction에 답한다(`/비서`에서도 재사용). */
+async function runDeleteTask(interaction: ChatInputCommandInteraction, findText: string) {
   try {
     const target = await findSingleTaskOrReply(interaction, findText);
     if (!target) return;
@@ -387,6 +436,82 @@ async function handleDeleteTaskCommand(interaction: ChatInputCommandInteraction)
     }
   } catch (err) {
     await interaction.editReply(`할 일 삭제 처리에 실패했습니다: ${(err as Error).message}`);
+  }
+}
+
+/** `/빈시간` — 기간(기본 오늘부터 7일) 안에서 09:00~18:00 중 일정이 없는 구간을 알려준다. */
+async function handleFreeTimeCommand(interaction: ChatInputCommandInteraction) {
+  const periodText = interaction.options.getString("기간");
+  const minutes = interaction.options.getInteger("길이") ?? 60;
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  try {
+    const { dateKey: today } = getTodayRange();
+    let dateFrom = today;
+    let dateTo = addDaysToDateKey(today, 6);
+
+    if (periodText) {
+      const intent = await parseSearchIntent(periodText);
+      dateFrom = intent.dateFrom ?? today;
+      dateTo = intent.dateTo ?? intent.dateFrom ?? addDaysToDateKey(today, 6);
+    }
+
+    // 일정 조회가 최대 50건이라 기간이 길면 결과가 부정확해진다. 최대 일수까지만 보고 안내한다.
+    const lastAllowed = addDaysToDateKey(dateFrom, MAX_FREE_TIME_DAYS - 1);
+    const clamped = dateTo > lastAllowed;
+    if (clamped) dateTo = lastAllowed;
+
+    const { slots, truncated } = await findFreeSlots(dateFrom, dateTo, minutes);
+    const note = clamped ? `_(최대 ${MAX_FREE_TIME_DAYS}일까지만 조회해요)_\n` : "";
+    await interaction.editReply(`${note}${formatFreeSlots(dateFrom, dateTo, minutes, slots, truncated)}`);
+  } catch (err) {
+    await interaction.editReply(`빈 시간을 찾지 못했습니다: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * `/비서` — 자유로운 한 문장을 어떤 작업인지 분류한 뒤, 기존 명령어의 처리 로직에 그대로 넘긴다.
+ * 삭제는 기존 명령어와 같이 확인 버튼을 거친다. 한 번에 한 가지 작업만 처리한다(한 메시지를 여러 작업이 고쳐 쓰면 서로 덮어쓰기 때문).
+ */
+async function handleAssistantCommand(interaction: ChatInputCommandInteraction) {
+  const text = interaction.options.getString("내용", true);
+  await interaction.deferReply();
+  try {
+    const req = await parseAssistantRequest(text);
+    if (req.multiple) {
+      await interaction.editReply("한 번에 한 가지 작업만 처리할 수 있어요. 나눠서 요청해주세요.");
+      return;
+    }
+
+    switch (req.action) {
+      case "add_event":
+        if (req.content) return await runAddEvent(interaction, req.content);
+        break;
+      case "edit_event":
+        if (req.find && req.change) return await runEditEvent(interaction, req.find, req.change);
+        break;
+      case "delete_event":
+        if (req.find) return await runDeleteEvent(interaction, req.find);
+        break;
+      case "list_events":
+        return await runList(interaction, req.period ?? null);
+      case "add_task":
+        if (req.content) return await runAddTask(interaction, req.content);
+        break;
+      case "edit_task":
+        if (req.find && req.change) return await runEditTask(interaction, req.find, req.change);
+        break;
+      case "delete_task":
+        if (req.find) return await runDeleteTask(interaction, req.find);
+        break;
+      case "complete_task":
+        if (req.find) return await runCompleteTask(interaction, req.find);
+        break;
+    }
+    await interaction.editReply(
+      "무엇을 할지 이해하지 못했어요. 예: `내일 3시 치과 잡아줘`, `보고서 할 일 추가해줘`, `test 할 일 지워줘`, `이번주 일정 알려줘`",
+    );
+  } catch (err) {
+    await interaction.editReply(`요청을 처리하지 못했습니다: ${(err as Error).message}`);
   }
 }
 
@@ -504,6 +629,23 @@ export const completeTaskCommand = new SlashCommandBuilder()
   .setDescription("자연어로 기존 할 일을 찾아 완료 처리합니다")
   .addStringOption((option) => option.setName("찾기").setDescription("예: 보고서").setRequired(true));
 
+export const freeTimeCommand = new SlashCommandBuilder()
+  .setName("빈시간")
+  .setDescription("기간 안에서 일정이 없는 빈 시간(09:00~18:00)을 찾습니다")
+  .addStringOption((option) =>
+    option.setName("기간").setDescription("예: 이번주, 다음주 (기본: 오늘부터 7일, 최대 14일)").setRequired(false),
+  )
+  .addIntegerOption((option) =>
+    option.setName("길이").setDescription("필요한 시간(분). 기본 60").setMinValue(15).setMaxValue(480).setRequired(false),
+  );
+
+export const assistantCommand = new SlashCommandBuilder()
+  .setName("비서")
+  .setDescription("자유로운 문장으로 일정/할 일을 등록·수정·삭제·완료·조회합니다")
+  .addStringOption((option) =>
+    option.setName("내용").setDescription("예: 내일 3시 치과 잡아줘, test 할 일 지워줘").setRequired(true),
+  );
+
 /** 봇의 슬래시 명령어 목록을 Discord 서버(전역)에 등록한다. `npm run register-commands`로 1회 실행하면 된다. */
 export async function registerCommands(): Promise<void> {
   const config = loadConfig();
@@ -521,6 +663,8 @@ export async function registerCommands(): Promise<void> {
       editTaskCommand.toJSON(),
       deleteTaskCommand.toJSON(),
       completeTaskCommand.toJSON(),
+      freeTimeCommand.toJSON(),
+      assistantCommand.toJSON(),
     ],
   });
 }
