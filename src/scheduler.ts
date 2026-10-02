@@ -93,6 +93,13 @@ async function runEveningPreview(): Promise<void> {
   const { timeMin, timeMax } = dateRangeToISO(tomorrow, tomorrow);
   const events = await listEvents(timeMin, timeMax);
   const tasks = await safely("tasks", () => getTasksOnDate(tomorrow));
+
+  // 내일 일정도 할 일도 없으면 날씨만 보내는 건 소음이라 발송하지 않는다.
+  if (events.length === 0 && (tasks ?? []).length === 0) {
+    console.log(`[evening] ${tomorrow} 일정/할 일이 없어 발송을 건너뜁니다`);
+    return;
+  }
+
   const weather = await safely("weather", () => getTomorrowWeather());
 
   const text = formatTomorrowPreview({ dateKey: tomorrow, events, tasks }, weather);
