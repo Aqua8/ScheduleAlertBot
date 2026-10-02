@@ -6,6 +6,8 @@
 //   3) parseSearchIntent — "내일 치과" 같은 검색 설명 → 키워드 + 날짜 범위
 //      (반복 일정이면 recurrence도 함께 뽑아 RRULE로 변환한다)
 //   4) parseTaskText / parseTaskUpdate — 할 일 등록/수정용 (제목 + 선택적 마감일)
+//   5) parseAssistantRequest — `/비서`용. 한 문장이 어떤 작업(일정/할 일 등록·수정·삭제 등)인지 분류하고,
+//      기존 명령어에 그대로 넘길 하위 문장(내용/찾기/변경/기간)으로 나눈다
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -268,4 +270,60 @@ export async function parseTaskUpdate(current: TaskItem, instruction: string): P
     `사용자의 변경 요청 문장을 반영해 수정 후 최종 할 일 정보를 JSON으로 출력해라. ` +
     `문장에서 언급되지 않은 항목은 위 기존 값을 그대로 유지하고, 마감일을 없애라고 하면 date를 null로 둬라.`;
   return callClaudeJson(systemPrompt, TASK_JSON_SCHEMA, instruction, parsedTaskSchema);
+}
+
+export const ASSISTANT_ACTIONS = [
+  "add_event",
+  "edit_event",
+  "delete_event",
+  "list_events",
+  "add_task",
+  "edit_task",
+  "delete_task",
+  "complete_task",
+  "unknown",
+] as const;
+
+const assistantRequestSchema = z.object({
+  action: z.enum(ASSISTANT_ACTIONS),
+  content: z.string().nullable().optional(),
+  find: z.string().nullable().optional(),
+  change: z.string().nullable().optional(),
+  period: z.string().nullable().optional(),
+  multiple: z.boolean().nullable().optional(),
+});
+
+export type AssistantRequest = z.infer<typeof assistantRequestSchema>;
+
+const ASSISTANT_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    action: {
+      type: "string",
+      enum: [...ASSISTANT_ACTIONS],
+      description:
+        "add_event=일정 등록, edit_event=일정 수정, delete_event=일정 삭제, list_events=일정 조회, " +
+        "add_task=할 일 등록, edit_task=할 일 수정, delete_task=할 일 삭제, complete_task=할 일 완료 처리, unknown=위에 해당 없음",
+    },
+    content: { type: ["string", "null"], description: "add_event/add_task일 때: 등록할 내용을 날짜/시간 표현을 살려 그대로 옮긴 문장" },
+    find: { type: ["string", "null"], description: "edit_*/delete_*/complete_task일 때: 대상을 찾기 위한 문장(날짜/제목 단서)" },
+    change: { type: ["string", "null"], description: "edit_*일 때: 무엇을 어떻게 바꿀지 설명하는 문장" },
+    period: { type: ["string", "null"], description: "list_events일 때: 조회 기간 표현(예: 이번주, 내일). 언급이 없으면 null" },
+    multiple: {
+      type: "boolean",
+      description: "한 문장에 서로 다른 작업이 두 개 이상 요청돼 있으면 true (예: 일정도 잡고 할 일도 추가)",
+    },
+  },
+  required: ["action", "multiple"],
+};
+
+/** "내일 3시 치과 잡아줘", "test 할일 지워줘" 같은 자유 문장을 어떤 작업인지 분류하고 하위 문장으로 나눈다. */
+export async function parseAssistantRequest(text: string): Promise<AssistantRequest> {
+  const { dateKey, weekday, tz } = todayContext();
+  const systemPrompt =
+    `오늘 날짜는 ${dateKey}(${weekday})이고 타임존은 ${tz}이다. ` +
+    `사용자의 한국어 요청이 캘린더 일정에 대한 것인지, 할 일(투두)에 대한 것인지 구분하고 어떤 작업인지 분류해라. ` +
+    `날짜/시간 표현은 해석하지 말고 하위 문장(content/find/change/period)에 원문 그대로 남겨라. ` +
+    `"일정/약속/미팅"은 이벤트, "할 일/해야 할 것/투두/마감"은 할 일이다. 작업이 불분명하면 unknown으로 둬라.`;
+  return callClaudeJson(systemPrompt, ASSISTANT_JSON_SCHEMA, text, assistantRequestSchema);
 }

@@ -1,17 +1,20 @@
-// 이 앱의 심장 역할을 하는 모듈. croner로 세 가지 정기 작업을 돌린다:
+// 이 앱의 심장 역할을 하는 모듈. croner로 네 가지 정기 작업을 돌린다:
 //   1) 매일 06:00 — 오늘 일정(+ 할 일, 날씨)을 처음 발송
 //   2) 5분마다   — 06:00 발송 이후 일정이 바뀌었는지 확인하고, 바뀌었으면 메시지를 갱신
 //   3) 매일 저녁(EVENING_SEND_TIME, 기본 21:00) — 내일 일정/할 일/날씨 미리보기 발송
+//   4) 매주 일요일(WEEKLY_SEND_TIME, 기본 20:00) — 다음 주 일정/할 일 요약 발송
+// 작업이 실패하면 로그만 남기지 않고 Discord로도 알린다(reportFailure).
 // 그 외에 "앱이 06:00을 지나서 켜졌을 때" 발송을 놓치지 않도록 하는 캐치업 로직도 여기 있다.
 import { Cron } from "croner";
 import { loadConfig } from "./config.js";
-import { formatTomorrowPreview } from "./format.js";
+import { formatTomorrowPreview, formatWeeklySummary } from "./format.js";
 import {
   getTodayEvents,
   getTodayRange,
   getTodayTasks,
   getOverdueTasks,
   getTasksOnDate,
+  listTasks,
   listEvents,
   dateRangeToISO,
   addDaysToDateKey,
@@ -109,6 +112,44 @@ async function runEveningPreview(): Promise<void> {
   console.log(`[evening] ${tomorrow} 발송 완료 (${events.length}건)`);
 }
 
+/** 일요일 저녁 발송: 내일(월)부터 7일간의 일정과 마감 할 일을 요약해 보낸다. 둘 다 없으면 보내지 않는다. */
+async function runWeeklySummary(): Promise<void> {
+  const dateFrom = addDaysToDateKey(getTodayRange().dateKey, 1);
+  const dateTo = addDaysToDateKey(dateFrom, 6);
+  console.log(`[weekly] ${dateFrom}~${dateTo} 주간 요약 발송 시작`);
+
+  const { timeMin, timeMax } = dateRangeToISO(dateFrom, dateTo);
+  const events = await listEvents(timeMin, timeMax);
+  const tasks = (await safely("tasks", () => listTasks({ dateFrom, dateTo }))) ?? [];
+
+  if (events.length === 0 && tasks.length === 0) {
+    console.log("[weekly] 다음 주 일정/할 일이 없어 발송을 건너뜁니다");
+    return;
+  }
+
+  const text = formatWeeklySummary(dateFrom, dateTo, events, tasks);
+  for (const notifier of notifiers) {
+    await notifier.sendText(text);
+  }
+  console.log(`[weekly] 발송 완료 (일정 ${events.length}건, 할 일 ${tasks.length}건)`);
+}
+
+/** 작업 실패를 로그에 남기고 Discord 등으로도 알린다. 알림 자체가 실패해도(Discord 장애 등) 다른 작업에 영향이 없도록 삼킨다. */
+async function reportFailure(label: string, err: unknown): Promise<void> {
+  console.error(`[${label}] 실패:`, err);
+  const text = `⚠️ ${label} 실패: ${(err as Error)?.message ?? err}`;
+  for (const notifier of notifiers) {
+    try {
+      await notifier.sendText(text);
+    } catch (notifyErr) {
+      console.error(`[${label}] 실패 알림도 보내지 못했습니다:`, notifyErr);
+    }
+  }
+}
+
+/** 변경 감지 폴링이 이 횟수만큼 연속 실패하면(5분 간격이라 약 15분) 한 번 알린다. 일시적 오류로 도배되지 않게 하기 위함. */
+const POLL_FAILURE_ALERT_THRESHOLD = 3;
+
 /** 5분마다 호출되는 폴링 함수. 오늘 일정을 다시 조회해 이전 해시와 비교하고, 달라졌으면만 갱신 발송한다. */
 async function runPollCheck(): Promise<void> {
   const { dateKey } = getTodayRange();
@@ -169,19 +210,36 @@ export async function startScheduler(): Promise<void> {
 
   // 매일 06:00
   new Cron("0 6 * * *", { timezone: config.TIMEZONE }, () => {
-    runDailySend().catch((err) => console.error("[daily] 실패:", err));
+    runDailySend().catch((err) => reportFailure("아침 발송", err));
   });
 
   // 매일 저녁 EVENING_SEND_TIME(HH:MM)에 내일 미리보기
   const [eveningHour, eveningMinute] = config.EVENING_SEND_TIME.split(":").map(Number);
   new Cron(`${eveningMinute} ${eveningHour} * * *`, { timezone: config.TIMEZONE }, () => {
-    runEveningPreview().catch((err) => console.error("[evening] 실패:", err));
+    runEveningPreview().catch((err) => reportFailure("저녁 미리보기", err));
+  });
+
+  // 매주 일요일 WEEKLY_SEND_TIME(HH:MM)에 다음 주 요약
+  const [weeklyHour, weeklyMinute] = config.WEEKLY_SEND_TIME.split(":").map(Number);
+  new Cron(`${weeklyMinute} ${weeklyHour} * * 0`, { timezone: config.TIMEZONE }, () => {
+    runWeeklySummary().catch((err) => reportFailure("주간 요약", err));
   });
 
   // 5분마다 변경 감지 폴링
+  let pollFailures = 0;
   new Cron("*/5 * * * *", { timezone: config.TIMEZONE }, () => {
-    runPollCheck().catch((err) => console.error("[poll] 실패:", err));
+    runPollCheck()
+      .then(() => {
+        pollFailures = 0;
+      })
+      .catch((err) => {
+        pollFailures += 1;
+        if (pollFailures === POLL_FAILURE_ALERT_THRESHOLD) return reportFailure("일정 변경 감지(연속 실패)", err);
+        console.error("[poll] 실패:", err);
+      });
   });
 
-  console.log(`[scheduler] 시작됨 (timezone=${config.TIMEZONE}) — 매일 06:00 / ${config.EVENING_SEND_TIME} 발송 + 5분마다 변경 감지`);
+  console.log(
+    `[scheduler] 시작됨 (timezone=${config.TIMEZONE}) — 매일 06:00 / ${config.EVENING_SEND_TIME} 발송, 일요일 ${config.WEEKLY_SEND_TIME} 주간 요약 + 5분마다 변경 감지`,
+  );
 }

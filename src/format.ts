@@ -3,6 +3,7 @@
 import { loadConfig } from "./config.js";
 import type { CalendarEvent, TaskItem } from "./calendar.js";
 import type { WeatherSummary } from "./weather.js";
+import { FREE_TIME_WINDOW_LABEL, type FreeSlot } from "./freeTime.js";
 
 const WEEKDAYS_KO = ["일", "월", "화", "수", "목", "금", "토"];
 
@@ -193,6 +194,63 @@ export function formatEventList(dateFrom: string, dateTo: string, events: Calend
     for (const ev of dayEvents) {
       lines.push(eventLine(ev, config.TIMEZONE));
     }
+  }
+  return lines.join("\n");
+}
+
+/** 30 → "30분", 60 → "1시간", 90 → "1시간 30분" */
+function formatDuration(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return [h ? `${h}시간` : "", m ? `${m}분` : ""].filter(Boolean).join(" ");
+}
+
+/** `/빈시간`용: 날짜별로 비어 있는 시간 구간을 보여준다. truncated면 일정이 많아 일부가 빠졌을 수 있다고 덧붙인다. */
+export function formatFreeSlots(
+  dateFrom: string,
+  dateTo: string,
+  minMinutes: number,
+  slots: FreeSlot[],
+  truncated: boolean,
+): string {
+  const tz = loadConfig().TIMEZONE;
+  const rangeLabel =
+    dateFrom === dateTo ? formatDateHeader(dateFrom, tz) : `${formatDateHeader(dateFrom, tz)} ~ ${formatDateHeader(dateTo, tz)}`;
+  const header = `🕒 ${rangeLabel} 빈 시간 (${formatDuration(minMinutes)} 이상, ${FREE_TIME_WINDOW_LABEL})`;
+
+  const lines: string[] = [header];
+  if (slots.length === 0) {
+    lines.push("조건에 맞는 빈 시간이 없습니다.");
+  }
+  let lastDate = "";
+  for (const slot of slots) {
+    if (slot.dateKey !== lastDate) {
+      lines.push(`\n${formatDateHeader(slot.dateKey, tz)}`);
+      lastDate = slot.dateKey;
+    }
+    lines.push(`• ${slot.start}-${slot.end}`);
+  }
+  lines.push("\n_(종일 일정은 시간을 막지 않는 것으로 계산했어요)_");
+  if (truncated) lines.push("_(일정이 많아 일부가 빠졌을 수 있어요. 기간을 줄여 보세요)_");
+  return lines.join("\n");
+}
+
+/** 일요일 저녁 발송용: 다음 주 일정과 마감 할 일을 날짜별로 묶어 보여준다. */
+export function formatWeeklySummary(dateFrom: string, dateTo: string, events: CalendarEvent[], tasks: TaskItem[]): string {
+  const tz = loadConfig().TIMEZONE;
+  const byDate = new Map<string, { events: CalendarEvent[]; tasks: TaskItem[] }>();
+  const bucket = (key: string) => {
+    if (!byDate.has(key)) byDate.set(key, { events: [], tasks: [] });
+    return byDate.get(key)!;
+  };
+  for (const ev of events) bucket(ev.start.slice(0, 10)).events.push(ev);
+  for (const t of tasks) if (t.due) bucket(t.due).tasks.push(t);
+
+  const lines: string[] = [`🗓️ 다음 주 (${formatDateHeader(dateFrom, tz)} ~ ${formatDateHeader(dateTo, tz)})`];
+  for (const [dateKey, day] of [...byDate.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    lines.push(`\n${formatDateHeader(dateKey, tz)}`);
+    for (const ev of day.events) lines.push(eventLine(ev, tz));
+    for (const t of day.tasks) lines.push(`✅ ${t.title}`);
   }
   return lines.join("\n");
 }
