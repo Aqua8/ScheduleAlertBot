@@ -1,5 +1,6 @@
 // 앱 진입점. launchd(또는 `npm run dev`/`start`)가 이 파일 하나만 실행하면
 // 1) 환경변수 검증 → 2) Discord 봇 로그인 → 3) 06:00 발송 + 5분 폴링 스케줄러 시작 순서로 상시 구동된다.
+import "./logger.js"; // 다른 모듈의 로그보다 먼저 console을 패치해야 하므로 가장 먼저 import 한다.
 import { loadConfig } from "./config.js";
 import { startDiscordClient } from "./notifiers/discord.js";
 import { startScheduler } from "./scheduler.js";
