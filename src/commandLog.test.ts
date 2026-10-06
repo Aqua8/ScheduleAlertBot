@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { classifyError, formatCommandLine, noteAction, noteCancelled, noteFailure, runLogged, sanitizeReason } from "./commandLog.js";
+import { classifyError, formatCommandLine, noteAction, noteCancelled, noteFailure, runLogged, sanitizeReason, timeWait } from "./commandLog.js";
 
 // console.log / console.warn 출력을 가로챈다.
 const out: { level: "log" | "warn"; line: string }[] = [];
@@ -94,4 +94,33 @@ test("사용자가 입력한 내용은 어떤 경우에도 로그에 나오지 �
   await assert.rejects(() => runLogged(crash, async () => { throw new Error("x"); }, tick(1)));
   assert.equal(out.length, 3);
   for (const o of out) assert.ok(!o.line.includes("비밀내용") && !o.line.includes("치과"), o.line);
+});
+
+test("timeWait: 확인 버튼을 기다린 시간은 처리 시간에서 뺀다", async () => {
+  // 시계는 호출할 때마다 100ms 씩 흐른다: 시작(1000) → 대기 시작(1100) → 대기 끝(1200) → 종료(1300). 전체 300ms 중 대기 100ms.
+  const now = tick(100);
+  const i = fake("일정삭제");
+  await runLogged(i, async () => { await timeWait(i, Promise.resolve("버튼"), now); }, now);
+  assert.deepEqual(out, [{ level: "log", line: "[command] /일정삭제 성공 (200ms)" }]);
+});
+
+test("timeWait: 대기가 시간 초과(예외)로 끝나도 기다린 시간은 뺀다", async () => {
+  const now = tick(100);
+  const i = fake("일정수정");
+  await runLogged(i, async () => {
+    try { await timeWait(i, Promise.reject(new Error("timeout")), now); } catch { noteCancelled(i, "시간 초과"); }
+  }, now);
+  assert.deepEqual(out, [{ level: "log", line: "[command] /일정수정 취소 (200ms): 시간 초과" }]);
+});
+
+test("timeWait: 여러 번 기다리면 모두 합쳐서 뺀다", async () => {
+  const now = tick(100); // 시작(1000) 대기1(1100~1200) 대기2(1300~1400) 종료(1500) = 전체 500, 대기 200
+  const i = fake("일정수정");
+  await runLogged(i, async () => { await timeWait(i, Promise.resolve(), now); await timeWait(i, Promise.resolve(), now); }, now);
+  assert.deepEqual(out, [{ level: "log", line: "[command] /일정수정 성공 (300ms)" }]);
+});
+
+test("timeWait 를 쓰지 않으면 전체 시간 그대로", async () => {
+  await runLogged(fake("오늘일정"), async () => {}, tick(250));
+  assert.deepEqual(out, [{ level: "log", line: "[command] /오늘일정 성공 (250ms)" }]);
 });
