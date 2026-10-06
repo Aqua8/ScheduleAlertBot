@@ -17,6 +17,7 @@ import {
   MessageFlags,
   type ChatInputCommandInteraction,
 } from "discord.js";
+import { noteAction, noteCancelled, noteFailure, runLogged } from "../commandLog.js";
 import { loadConfig, requireDiscordConfig } from "../config.js";
 import {
   formatDailySummary,
@@ -56,31 +57,33 @@ export function startDiscordClient(): Promise<Client> {
 
   client.on("interactionCreate", async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
+    // 어떤 명령을 썼는지, 성공/실패/취소를 로그 한 줄로 남긴다 (입력한 내용은 남기지 않는다).
+    const run = (handle: (i: ChatInputCommandInteraction) => Promise<unknown>) => runLogged(interaction, () => handle(interaction));
     switch (interaction.commandName) {
       case "오늘일정":
-        return handleTodayCommand(interaction);
+        return run(handleTodayCommand);
       case "일정추가":
-        return handleAddEventCommand(interaction);
+        return run(handleAddEventCommand);
       case "일정목록":
-        return handleListCommand(interaction);
+        return run(handleListCommand);
       case "일정수정":
-        return handleEditCommand(interaction);
+        return run(handleEditCommand);
       case "일정삭제":
-        return handleDeleteCommand(interaction);
+        return run(handleDeleteCommand);
       case "오늘날씨":
-        return handleWeatherCommand(interaction);
+        return run(handleWeatherCommand);
       case "할일추가":
-        return handleAddTaskCommand(interaction);
+        return run(handleAddTaskCommand);
       case "할일수정":
-        return handleEditTaskCommand(interaction);
+        return run(handleEditTaskCommand);
       case "할일삭제":
-        return handleDeleteTaskCommand(interaction);
+        return run(handleDeleteTaskCommand);
       case "할일완료":
-        return handleCompleteTaskCommand(interaction);
+        return run(handleCompleteTaskCommand);
       case "빈시간":
-        return handleFreeTimeCommand(interaction);
+        return run(handleFreeTimeCommand);
       case "비서":
-        return handleAssistantCommand(interaction);
+        return run(handleAssistantCommand);
     }
   });
 
@@ -103,6 +106,7 @@ async function handleTodayCommand(interaction: ChatInputCommandInteraction) {
     const text = formatDailySummary({ dateKey, events, tasks, overdueTasks });
     await interaction.editReply(text);
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`일정을 불러오지 못했습니다: ${(err as Error).message}`);
   }
 }
@@ -113,6 +117,7 @@ async function handleWeatherCommand(interaction: ChatInputCommandInteraction) {
     const weather = await getTodayWeather();
     await interaction.editReply(formatWeatherLine(weather));
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`날씨 정보를 가져오지 못했습니다: ${(err as Error).message}`);
   }
 }
@@ -134,6 +139,7 @@ async function runAddEvent(interaction: ChatInputCommandInteraction, text: strin
     const warning = conflicts.length > 0 ? `\n\n⚠️ 시간이 겹치는 일정이 있어요\n${formatEventCandidates(conflicts)}` : "";
     await interaction.editReply(`✅ 일정을 등록했습니다\n${formatEventBrief(created)}${warning}`);
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`일정 등록에 실패했습니다: ${(err as Error).message}`);
   }
 }
@@ -163,6 +169,7 @@ async function runList(interaction: ChatInputCommandInteraction, periodText: str
     const events = await listEvents(timeMin, timeMax);
     await interaction.editReply(formatEventList(dateFrom, dateTo, events));
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`일정 목록을 불러오지 못했습니다: ${(err as Error).message}`);
   }
 }
@@ -174,10 +181,12 @@ async function findSingleEventOrReply(
 ) {
   const matches = await findMatchingEvents(findText);
   if (matches.length === 0) {
+    noteFailure(interaction, "대상을 찾지 못함");
     await interaction.editReply(`"${findText}"에 해당하는 일정을 찾지 못했습니다.`);
     return null;
   }
   if (matches.length > 1) {
+    noteFailure(interaction, "검색 결과가 여러 개");
     await interaction.editReply(
       `일정이 여러 개 검색되었습니다. 날짜를 더 구체적으로 입력해주세요:\n${formatEventCandidates(matches)}`,
     );
@@ -232,10 +241,12 @@ async function runEditEvent(interaction: ChatInputCommandInteraction, findText: 
         { id: "scope_cancel", label: "취소", style: ButtonStyle.Secondary },
       ]);
       if (!button) {
+        noteCancelled(interaction, "시간 초과");
         await interaction.editReply({ content: "응답 시간이 초과되어 수정을 취소했습니다.", components: [] });
         return;
       }
       if (button.customId === "scope_cancel") {
+        noteCancelled(interaction, "사용자가 취소");
         await button.update({ content: "수정을 취소했습니다.", components: [] });
         return;
       }
@@ -251,6 +262,7 @@ async function runEditEvent(interaction: ChatInputCommandInteraction, findText: 
     const updated = await updateEvent(editTarget.id, { ...updatedInput, recurrence });
     await interaction.editReply({ content: `✏️ 일정을 수정했습니다\n${formatEventBrief(updated)}`, components: [] });
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`일정 수정에 실패했습니다: ${(err as Error).message}`);
   }
 }
@@ -276,8 +288,10 @@ async function runDeleteEvent(interaction: ChatInputCommandInteraction, findText
         { id: "scope_cancel", label: "취소", style: ButtonStyle.Secondary },
       ]);
       if (!button) {
+        noteCancelled(interaction, "시간 초과");
         await interaction.editReply({ content: "응답 시간이 초과되어 삭제를 취소했습니다.", components: [] });
       } else if (button.customId === "scope_cancel") {
+        noteCancelled(interaction, "사용자가 취소");
         await button.update({ content: "삭제를 취소했습니다.", components: [] });
       } else {
         const series = button.customId === "scope_series";
@@ -310,13 +324,16 @@ async function runDeleteEvent(interaction: ChatInputCommandInteraction, findText
         await deleteEvent(target.id);
         await button.update({ content: `🗑️ 일정을 삭제했습니다\n${formatEventBrief(target)}`, components: [] });
       } else {
+        noteCancelled(interaction, "사용자가 취소");
         await button.update({ content: "삭제를 취소했습니다.", components: [] });
       }
     } catch {
       // awaitMessageComponent가 타임아웃되면 예외를 던지는데, 이 경우가 "30초 무응답"에 해당한다.
+      noteCancelled(interaction, "시간 초과");
       await interaction.editReply({ content: "응답 시간이 초과되어 삭제를 취소했습니다.", components: [] });
     }
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`일정 삭제 처리에 실패했습니다: ${(err as Error).message}`);
   }
 }
@@ -335,6 +352,7 @@ async function runAddTask(interaction: ChatInputCommandInteraction, text: string
     const created = await createTask(parsed);
     await interaction.editReply(`✅ 할 일을 등록했습니다\n${formatTaskBrief(created)}`);
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`할 일 등록에 실패했습니다: ${(err as Error).message}`);
   }
 }
@@ -343,10 +361,12 @@ async function runAddTask(interaction: ChatInputCommandInteraction, text: string
 async function findSingleTaskOrReply(interaction: ChatInputCommandInteraction, findText: string) {
   const matches = await findMatchingTasks(findText);
   if (matches.length === 0) {
+    noteFailure(interaction, "대상을 찾지 못함");
     await interaction.editReply(`"${findText}"에 해당하는 할 일을 찾지 못했습니다.`);
     return null;
   }
   if (matches.length > 1) {
+    noteFailure(interaction, "검색 결과가 여러 개");
     await interaction.editReply(
       `할 일이 여러 개 검색되었습니다. 더 구체적으로 입력해주세요:\n${formatTaskCandidates(matches)}`,
     );
@@ -373,6 +393,7 @@ async function runEditTask(interaction: ChatInputCommandInteraction, findText: s
     const updated = await updateTask(target, updatedInput);
     await interaction.editReply(`✏️ 할 일을 수정했습니다\n${formatTaskBrief(updated)}`);
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`할 일 수정에 실패했습니다: ${(err as Error).message}`);
   }
 }
@@ -393,6 +414,7 @@ async function runCompleteTask(interaction: ChatInputCommandInteraction, findTex
     await completeTask(target);
     await interaction.editReply(`✅ 할 일을 완료 처리했습니다\n${formatTaskBrief(target)}`);
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`할 일 완료 처리에 실패했습니다: ${(err as Error).message}`);
   }
 }
@@ -429,12 +451,15 @@ async function runDeleteTask(interaction: ChatInputCommandInteraction, findText:
         await deleteTask(target);
         await button.update({ content: `🗑️ 할 일을 삭제했습니다\n${formatTaskBrief(target)}`, components: [] });
       } else {
+        noteCancelled(interaction, "사용자가 취소");
         await button.update({ content: "삭제를 취소했습니다.", components: [] });
       }
     } catch {
+      noteCancelled(interaction, "시간 초과");
       await interaction.editReply({ content: "응답 시간이 초과되어 삭제를 취소했습니다.", components: [] });
     }
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`할 일 삭제 처리에 실패했습니다: ${(err as Error).message}`);
   }
 }
@@ -464,6 +489,7 @@ async function handleFreeTimeCommand(interaction: ChatInputCommandInteraction) {
     const note = clamped ? `_(최대 ${MAX_FREE_TIME_DAYS}일까지만 조회해요)_\n` : "";
     await interaction.editReply(`${note}${formatFreeSlots(dateFrom, dateTo, minutes, slots, truncated)}`);
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`빈 시간을 찾지 못했습니다: ${(err as Error).message}`);
   }
 }
@@ -472,12 +498,26 @@ async function handleFreeTimeCommand(interaction: ChatInputCommandInteraction) {
  * `/비서` — 자유로운 한 문장을 어떤 작업인지 분류한 뒤, 기존 명령어의 처리 로직에 그대로 넘긴다.
  * 삭제는 기존 명령어와 같이 확인 버튼을 거친다. 한 번에 한 가지 작업만 처리한다(한 메시지를 여러 작업이 고쳐 쓰면 서로 덮어쓰기 때문).
  */
+const ASSISTANT_ACTION_LABEL = {
+  add_event: "일정추가",
+  edit_event: "일정수정",
+  delete_event: "일정삭제",
+  list_events: "일정목록",
+  add_task: "할일추가",
+  edit_task: "할일수정",
+  delete_task: "할일삭제",
+  complete_task: "할일완료",
+} as const;
+
 async function handleAssistantCommand(interaction: ChatInputCommandInteraction) {
   const text = interaction.options.getString("내용", true);
   await interaction.deferReply();
   try {
     const req = await parseAssistantRequest(text);
+    const actionLabel = (ASSISTANT_ACTION_LABEL as Record<string, string | undefined>)[req.action];
+    if (actionLabel) noteAction(interaction, actionLabel); // 문장 내용이 아니라 어떤 동작으로 해석됐는지만 남긴다.
     if (req.multiple) {
+      noteFailure(interaction, "여러 작업을 한 번에 요청");
       await interaction.editReply("한 번에 한 가지 작업만 처리할 수 있어요. 나눠서 요청해주세요.");
       return;
     }
@@ -507,10 +547,12 @@ async function handleAssistantCommand(interaction: ChatInputCommandInteraction) 
         if (req.find) return await runCompleteTask(interaction, req.find);
         break;
     }
+    noteFailure(interaction, "요청을 이해하지 못함");
     await interaction.editReply(
       "무엇을 할지 이해하지 못했어요. 예: `내일 3시 치과 잡아줘`, `보고서 할 일 추가해줘`, `test 할 일 지워줘`, `이번주 일정 알려줘`",
     );
   } catch (err) {
+    noteFailure(interaction, err);
     await interaction.editReply(`요청을 처리하지 못했습니다: ${(err as Error).message}`);
   }
 }
