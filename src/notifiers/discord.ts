@@ -17,7 +17,7 @@ import {
   MessageFlags,
   type ChatInputCommandInteraction,
 } from "discord.js";
-import { noteAction, noteCancelled, noteFailure, runLogged } from "../commandLog.js";
+import { noteAction, noteCancelled, noteFailure, runLogged, timeWait } from "../commandLog.js";
 import { loadConfig, requireDiscordConfig } from "../config.js";
 import {
   formatDailySummary,
@@ -206,11 +206,11 @@ async function askButtons(
   );
   const reply = await interaction.editReply({ content, components: [row] });
   try {
-    return await reply.awaitMessageComponent({
+    return await timeWait(interaction, reply.awaitMessageComponent({
       componentType: ComponentType.Button,
       filter: (i) => i.user.id === interaction.user.id,
       time: 30_000,
-    });
+    }));
   } catch {
     return null;
   }
@@ -315,11 +315,11 @@ async function runDeleteEvent(interaction: ChatInputCommandInteraction, findText
 
     try {
       // 명령어를 실행한 본인만 버튼을 누를 수 있게 제한하고, 30초 안에 응답이 없으면 아래 catch로 넘어가 자동 취소된다.
-      const button = await reply.awaitMessageComponent({
+      const button = await timeWait(interaction, reply.awaitMessageComponent({
         componentType: ComponentType.Button,
         filter: (i) => i.user.id === interaction.user.id,
         time: 30_000,
-      });
+      }));
       if (button.customId === "delete_confirm") {
         await deleteEvent(target.id);
         await button.update({ content: `🗑️ 일정을 삭제했습니다\n${formatEventBrief(target)}`, components: [] });
@@ -442,11 +442,11 @@ async function runDeleteTask(interaction: ChatInputCommandInteraction, findText:
     });
 
     try {
-      const button = await reply.awaitMessageComponent({
+      const button = await timeWait(interaction, reply.awaitMessageComponent({
         componentType: ComponentType.Button,
         filter: (i) => i.user.id === interaction.user.id,
         time: 30_000,
-      });
+      }));
       if (button.customId === "delete_confirm") {
         await deleteTask(target);
         await button.update({ content: `🗑️ 할 일을 삭제했습니다\n${formatTaskBrief(target)}`, components: [] });

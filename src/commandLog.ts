@@ -1,4 +1,4 @@
-// 디스코드 슬래시 명령 사용 기록. 어떤 명령을 썼는지, 성공/실패/취소, 소요 시간을 로그 한 줄로 남긴다.
+// 디스코드 슬래시 명령 사용 기록. 어떤 명령을 썼는지, 성공/실패/취소, 처리 시간(확인 버튼 대기 시간 제외)을 로그 한 줄로 남긴다.
 // 이 로그는 BotMng 관제 화면(게스트 공개)에 그대로 보이므로 사용자가 입력한 내용(일정 제목, 할 일 등)은 절대 남기지 않는다.
 // 형식을 바꾸면 BotMng에서 `[command]` 태그로 필터링하는 쪽도 영향을 받는다.
 
@@ -15,6 +15,7 @@ interface Trace {
   action?: string;
   outcome: Outcome;
   reason?: string;
+  waitMs: number; // 사용자가 확인 버튼을 누르길 기다린 시간. 처리 시간에서 뺀다.
 }
 
 const LABEL: Record<Outcome, string> = { success: "성공", failure: "실패", cancelled: "취소" };
@@ -53,7 +54,7 @@ export function classifyError(err: unknown): string {
 const traces = new WeakMap<object, Trace>();
 const traceOf = (i: object): Trace => {
   let t = traces.get(i);
-  if (!t) traces.set(i, (t = { outcome: "success" }));
+  if (!t) traces.set(i, (t = { outcome: "success", waitMs: 0 }));
   return t;
 };
 
@@ -76,6 +77,16 @@ export function noteCancelled(i: object, reason: string) {
   t.reason = reason;
 }
 
+/** 사람이 버튼을 누르길 기다리는 구간을 감싼다. 이 시간은 "처리 시간"에서 빼므로, 봇이 실제로 일한 시간만 남는다. 대기가 예외(시간 초과)로 끝나도 기다린 시간은 뺀다. */
+export async function timeWait<T>(i: object, waiting: Promise<T>, now: () => number = Date.now): Promise<T> {
+  const t0 = now();
+  try {
+    return await waiting;
+  } finally {
+    traceOf(i).waitMs += now() - t0;
+  }
+}
+
 /** 명령 핸들러를 실행하고 결과를 로그 한 줄로 남긴다. 핸들러가 예외를 던지면 실패로 기록하고 그대로 다시 던진다. */
 export async function runLogged(interaction: { commandName: string }, handler: () => Promise<unknown>, now: () => number = Date.now) {
   const started = now();
@@ -91,7 +102,7 @@ export async function runLogged(interaction: { commandName: string }, handler: (
 
   const t = traceOf(interaction);
   const name = `/${interaction.commandName}`;
-  const line = formatCommandLine({ command: t.action ? `${name}(${t.action})` : name, outcome: t.outcome, ms: now() - started, reason: t.reason });
+  const line = formatCommandLine({ command: t.action ? `${name}(${t.action})` : name, outcome: t.outcome, ms: now() - started - t.waitMs, reason: t.reason });
   if (t.outcome === "failure") console.warn(line);
   else console.log(line);
 
