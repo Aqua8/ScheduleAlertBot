@@ -134,10 +134,32 @@ async function runWeeklySummary(): Promise<void> {
   console.log(`[weekly] 발송 완료 (일정 ${events.length}건, 할 일 ${tasks.length}건)`);
 }
 
+/** Google 토큰 만료·철회 등 재로그인이 필요한 인증 오류인지 판별한다. 일시적 네트워크 오류는 해당하지 않는다. */
+function isGoogleAuthError(err: unknown): boolean {
+  const e = err as { message?: string; response?: { data?: { error?: string } } };
+  const code = e?.response?.data?.error ?? e?.message ?? "";
+  return /invalid_grant|invalid_client|unauthorized_client|invalid_token/.test(String(code));
+}
+
+/** 같은 인증 오류 알림을 이 시간 안에는 다시 보내지 않는다. 5분 폴링이 매번 같은 알림을 보내 도배하는 것을 막는다. */
+const AUTH_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+let lastAuthAlertAt = 0;
+
 /** 작업 실패를 로그에 남기고 Discord 등으로도 알린다. 알림 자체가 실패해도(Discord 장애 등) 다른 작업에 영향이 없도록 삼킨다. */
 async function reportFailure(label: string, err: unknown): Promise<void> {
   console.error(`[${label}] 실패:`, err);
-  const text = `⚠️ ${label} 실패: ${(err as Error)?.message ?? err}`;
+
+  let text: string;
+  if (isGoogleAuthError(err)) {
+    if (Date.now() - lastAuthAlertAt < AUTH_ALERT_COOLDOWN_MS) return;
+    lastAuthAlertAt = Date.now();
+    text =
+      `🔑 Google 인증이 만료되었거나 취소되어 ${label}에 실패했습니다.\n` +
+      "일정·할 일 조회가 모두 멈춘 상태입니다. 서버에서 `npm run auth:google`로 다시 로그인해 주세요.";
+  } else {
+    text = `⚠️ ${label} 실패: ${(err as Error)?.message ?? err}`;
+  }
+
   for (const notifier of notifiers) {
     try {
       await notifier.sendText(text);
@@ -236,6 +258,8 @@ export async function startScheduler(): Promise<void> {
       })
       .catch((err) => {
         pollFailures += 1;
+        // 인증 오류는 재시도해도 낫지 않으므로 연속 실패를 기다리지 않고 바로 알린다(쿨다운은 reportFailure가 처리).
+        if (isGoogleAuthError(err)) return reportFailure("일정 변경 감지", err);
         if (pollFailures === POLL_FAILURE_ALERT_THRESHOLD) return reportFailure("일정 변경 감지(연속 실패)", err);
         console.error("[poll] 실패:", err);
       });
