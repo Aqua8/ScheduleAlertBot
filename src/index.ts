@@ -13,7 +13,7 @@ async function main() {
 }
 
 /** 치명적 오류 후 재시작까지 최소 대기 시간. launchd가 곧바로 재시작하면 Discord 로그인 한도(하루 1000회)를 금방 소진한다. */
-const FATAL_EXIT_DELAY_MS = 60_000;
+const FATAL_EXIT_DELAY_MS = 5 * 60_000;
 
 main().catch(async (err) => {
   // 여기서 잡히는 에러는 초기화 단계의 치명적 오류(설정 누락, 로그인 실패 등)이므로 프로세스를 종료한다.
