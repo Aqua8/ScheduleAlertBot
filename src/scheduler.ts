@@ -5,6 +5,7 @@
 //   4) 매주 일요일(WEEKLY_SEND_TIME, 기본 20:00) — 다음 주 일정/할 일 요약 발송
 // 작업이 실패하면 로그만 남기지 않고 Discord로도 알린다(reportFailure).
 // 그 외에 "앱이 06:00을 지나서 켜졌을 때" 발송을 놓치지 않도록 하는 캐치업 로직도 여기 있다.
+import { stat } from "node:fs/promises";
 import { Cron } from "croner";
 import { loadConfig } from "./config.js";
 import { formatTomorrowPreview, formatWeeklySummary } from "./format.js";
@@ -18,6 +19,7 @@ import {
   listEvents,
   dateRangeToISO,
   addDaysToDateKey,
+  TOKEN_PATH,
   type TaskItem,
 } from "./calendar.js";
 import { hashEvents, loadState, saveState, type DailyState } from "./state.js";
@@ -134,6 +136,31 @@ async function runWeeklySummary(): Promise<void> {
   console.log(`[weekly] 발송 완료 (일정 ${events.length}건, 할 일 ${tasks.length}건)`);
 }
 
+/**
+ * Google 인증 오류가 나면 재로그인할 때까지 Google을 호출하는 작업(폴링, 정기 발송)을 멈춘다.
+ * 값은 오류 시점의 토큰 파일 수정 시각이고, `npm run auth:google`로 파일이 바뀌면 자동으로 재개한다.
+ * null이면 중단 상태가 아니다. 메모리에만 있으므로 재시작하면 초기화된다.
+ */
+let authPausedTokenMtime: number | null = null;
+
+async function getTokenMtime(): Promise<number> {
+  try {
+    return (await stat(TOKEN_PATH)).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/** 중단 상태면 true. 토큰 파일이 갱신됐으면 중단을 풀고 놓친 오늘 발송을 보충한 뒤 false를 돌려준다. */
+async function isAuthPaused(): Promise<boolean> {
+  if (authPausedTokenMtime === null) return false;
+  if ((await getTokenMtime()) === authPausedTokenMtime) return true;
+  authPausedTokenMtime = null;
+  console.log("[auth] 토큰 파일이 갱신되어 작업을 재개합니다");
+  await catchUpIfNeeded().catch((err) => reportFailure("재개 후 캐치업 발송", err));
+  return false;
+}
+
 /** Google 토큰 만료·철회 등 재로그인이 필요한 인증 오류인지 판별한다. 일시적 네트워크 오류는 해당하지 않는다. */
 function isGoogleAuthError(err: unknown): boolean {
   const e = err as { message?: string; response?: { data?: { error?: string } } };
@@ -151,11 +178,12 @@ async function reportFailure(label: string, err: unknown): Promise<void> {
 
   let text: string;
   if (isGoogleAuthError(err)) {
+    authPausedTokenMtime = await getTokenMtime();
     if (Date.now() - lastAuthAlertAt < AUTH_ALERT_COOLDOWN_MS) return;
     lastAuthAlertAt = Date.now();
     text =
       `🔑 Google 인증이 만료되었거나 취소되어 ${label}에 실패했습니다.\n` +
-      "일정·할 일 조회가 모두 멈춘 상태입니다. 서버에서 `npm run auth:google`로 다시 로그인해 주세요.";
+      "재로그인할 때까지 자동 발송과 변경 감지를 멈춥니다. 서버에서 `npm run auth:google`로 다시 로그인하면 자동으로 재개됩니다.";
   } else {
     text = `⚠️ ${label} 실패: ${(err as Error)?.message ?? err}`;
   }
@@ -225,6 +253,12 @@ async function catchUpIfNeeded(): Promise<void> {
   await runDailySend();
 }
 
+/** 인증 오류로 중단 중이면 건너뛴다. 정기 작업은 모두 이 함수를 거쳐 실행한다. */
+async function guarded(fn: () => Promise<void>): Promise<void> {
+  if (await isAuthPaused()) return;
+  await fn();
+}
+
 export async function startScheduler(): Promise<void> {
   const config = loadConfig();
 
@@ -234,25 +268,25 @@ export async function startScheduler(): Promise<void> {
 
   // 매일 06:00
   new Cron("0 6 * * *", { timezone: config.TIMEZONE }, () => {
-    runDailySend().catch((err) => reportFailure("아침 발송", err));
+    guarded(runDailySend).catch((err) => reportFailure("아침 발송", err));
   });
 
   // 매일 저녁 EVENING_SEND_TIME(HH:MM)에 내일 미리보기
   const [eveningHour, eveningMinute] = config.EVENING_SEND_TIME.split(":").map(Number);
   new Cron(`${eveningMinute} ${eveningHour} * * *`, { timezone: config.TIMEZONE }, () => {
-    runEveningPreview().catch((err) => reportFailure("저녁 미리보기", err));
+    guarded(runEveningPreview).catch((err) => reportFailure("저녁 미리보기", err));
   });
 
   // 매주 일요일 WEEKLY_SEND_TIME(HH:MM)에 다음 주 요약
   const [weeklyHour, weeklyMinute] = config.WEEKLY_SEND_TIME.split(":").map(Number);
   new Cron(`${weeklyMinute} ${weeklyHour} * * 0`, { timezone: config.TIMEZONE }, () => {
-    runWeeklySummary().catch((err) => reportFailure("주간 요약", err));
+    guarded(runWeeklySummary).catch((err) => reportFailure("주간 요약", err));
   });
 
   // 5분마다 변경 감지 폴링
   let pollFailures = 0;
   new Cron("*/5 * * * *", { timezone: config.TIMEZONE }, () => {
-    runPollCheck()
+    guarded(runPollCheck)
       .then(() => {
         pollFailures = 0;
       })

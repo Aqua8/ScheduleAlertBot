@@ -23,7 +23,7 @@ export interface CalendarEvent {
   recurrence?: string[];
 }
 
-const TOKEN_PATH = fileURLToPath(new URL("google-token.json", DATA_DIR));
+export const TOKEN_PATH = fileURLToPath(new URL("google-token.json", DATA_DIR));
 
 /** 저장된 refresh token(`data/google-token.json`)으로 인증된 OAuth 클라이언트를 만든다. 토큰이 없으면 재로그인을 안내한다. */
 async function getOAuthClient() {
