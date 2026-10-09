@@ -206,7 +206,9 @@ async function catchUpIfNeeded(): Promise<void> {
 export async function startScheduler(): Promise<void> {
   const config = loadConfig();
 
-  await catchUpIfNeeded();
+  // 캐치업 실패(Google 토큰 만료 등)로 프로세스가 죽으면 launchd 재시작 루프가 Discord 로그인 한도를 소진한다.
+  // 그래서 실패를 알리기만 하고 스케줄러는 계속 시작한다.
+  await catchUpIfNeeded().catch((err) => reportFailure("시작 시 캐치업 발송", err));
 
   // 매일 06:00
   new Cron("0 6 * * *", { timezone: config.TIMEZONE }, () => {
