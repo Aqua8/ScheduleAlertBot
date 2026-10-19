@@ -4,7 +4,7 @@ import { registerCommands } from "../src/notifiers/discord.js";
 
 registerCommands()
   .then(() => {
-    console.log("슬래시 명령어(/오늘일정) 등록 완료. 서버에 반영까지 최대 1시간 걸릴 수 있습니다.");
+    console.log("슬래시 명령어 등록 완료. 서버에 반영까지 최대 1시간 걸릴 수 있습니다.");
     process.exit(0);
   })
   .catch((err) => {
