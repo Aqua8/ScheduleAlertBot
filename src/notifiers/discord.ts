@@ -1,6 +1,6 @@
 // Discord 봇 구현체. 크게 두 역할을 한다:
 //   1) discordNotifier — scheduler.ts가 호출하는 Notifier 구현 (06:00 발송 / 변경 시 메시지 수정)
-//   2) 슬래시 명령어 12종의 핸들러 — 사용자가 직접 캘린더/날씨를 조회·조작할 때 쓰는 대화형 인터페이스
+//   2) 슬래시 명령어 18종의 핸들러 — 사용자가 직접 캘린더/날씨를 조회·조작할 때 쓰는 대화형 인터페이스
 import {
   Client,
   GatewayIntentBits,
@@ -15,6 +15,7 @@ import {
   ButtonStyle,
   ComponentType,
   MessageFlags,
+  User,
   type ChatInputCommandInteraction,
 } from "discord.js";
 import { noteAction, noteCancelled, noteFailure, runLogged, timeWait } from "../commandLog.js";
@@ -40,6 +41,7 @@ import { findMatchingEvents } from "../eventSearch.js";
 import { findMatchingTasks } from "../taskSearch.js";
 import { findFreeSlots, MAX_FREE_TIME_DAYS } from "../freeTime.js";
 import { getTodayWeather } from "../weather.js";
+import { findShoppingItem, formatShoppingList, loadShoppingList, parseShoppingItems, saveShoppingList } from "../shopping.js";
 
 let client: Client | null = null;
 let ready: Promise<Client> | null = null;
@@ -80,6 +82,18 @@ export function startDiscordClient(): Promise<Client> {
         return run(handleDeleteTaskCommand);
       case "할일완료":
         return run(handleCompleteTaskCommand);
+      case "살것추가":
+        return run(handleAddShoppingCommand);
+      case "살것목록":
+        return run(handleShoppingListCommand);
+      case "살것수정":
+        return run(handleEditShoppingCommand);
+      case "살것삭제":
+        return run(handleDeleteShoppingCommand);
+      case "살것목록전송":
+        return run(handleSendShoppingCommand);
+      case "봇재시작":
+        return run(handleRestartCommand);
       case "빈시간":
         return run(handleFreeTimeCommand);
       case "비서":
@@ -464,6 +478,129 @@ async function runDeleteTask(interaction: ChatInputCommandInteraction, findText:
   }
 }
 
+/** `/살것추가` — 쉼표/줄바꿈으로 구분한 항목들을 사야 할 것 목록 끝에 추가한다. */
+async function handleAddShoppingCommand(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply();
+  try {
+    const added = parseShoppingItems(interaction.options.getString("내용", true));
+    if (added.length === 0) {
+      noteFailure(interaction, "추가할 항목이 없음");
+      await interaction.editReply("추가할 항목을 입력해주세요.");
+      return;
+    }
+    const items = [...(await loadShoppingList()), ...added];
+    await saveShoppingList(items);
+    await interaction.editReply(`🛒 ${added.length}개를 추가했습니다\n${formatShoppingList(items)}`);
+  } catch (err) {
+    noteFailure(interaction, err);
+    await interaction.editReply(`사야 할 것 추가에 실패했습니다: ${(err as Error).message}`);
+  }
+}
+
+/** `/살것목록` — 사야 할 것 전체를 번호와 함께 보여준다. */
+async function handleShoppingListCommand(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  try {
+    const items = await loadShoppingList();
+    await interaction.editReply(items.length === 0 ? "사야 할 것이 없습니다." : `🛒 사야 할 것 (${items.length})\n${formatShoppingList(items)}`);
+  } catch (err) {
+    noteFailure(interaction, err);
+    await interaction.editReply(`사야 할 것을 불러오지 못했습니다: ${(err as Error).message}`);
+  }
+}
+
+/** `/살것수정` — 번호나 이름 일부로 항목 하나를 찾아 새 이름으로 바꾼다. */
+async function handleEditShoppingCommand(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply();
+  try {
+    const newName = interaction.options.getString("변경", true).trim();
+    const items = await loadShoppingList();
+    const match = findShoppingItem(items, interaction.options.getString("찾기", true));
+    if ("error" in match) {
+      noteFailure(interaction, "대상을 찾지 못했거나 여러 개");
+      await interaction.editReply(match.error);
+      return;
+    }
+    const old = items[match.index];
+    items[match.index] = newName;
+    await saveShoppingList(items);
+    await interaction.editReply(`✏️ 수정했습니다: ${old} → ${newName}\n${formatShoppingList(items)}`);
+  } catch (err) {
+    noteFailure(interaction, err);
+    await interaction.editReply(`사야 할 것 수정에 실패했습니다: ${(err as Error).message}`);
+  }
+}
+
+/** `/살것삭제` — 번호나 이름 일부로 항목 하나를 찾아 확인 없이 바로 지운다(다시 추가하면 되므로). */
+async function handleDeleteShoppingCommand(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply();
+  try {
+    const items = await loadShoppingList();
+    const match = findShoppingItem(items, interaction.options.getString("찾기", true));
+    if ("error" in match) {
+      noteFailure(interaction, "대상을 찾지 못했거나 여러 개");
+      await interaction.editReply(match.error);
+      return;
+    }
+    const [removed] = items.splice(match.index, 1);
+    await saveShoppingList(items);
+    await interaction.editReply(`🗑️ 삭제했습니다: ${removed}${items.length ? `\n${formatShoppingList(items)}` : "\n남은 항목이 없습니다."}`);
+  } catch (err) {
+    noteFailure(interaction, err);
+    await interaction.editReply(`사야 할 것 삭제에 실패했습니다: ${(err as Error).message}`);
+  }
+}
+
+/** `/살것목록전송` — 사야 할 것 목록을 선택한 사용자에게 개인 메시지(DM)로 보낸다. */
+async function handleSendShoppingCommand(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  try {
+    const target = interaction.options.getUser("받는사람", true);
+    if (target.bot) {
+      noteFailure(interaction, "봇에게는 보낼 수 없음");
+      await interaction.editReply("봇에게는 보낼 수 없습니다.");
+      return;
+    }
+    const items = await loadShoppingList();
+    if (items.length === 0) {
+      noteFailure(interaction, "목록이 비어 있음");
+      await interaction.editReply("사야 할 것이 없어서 보내지 않았습니다.");
+      return;
+    }
+    try {
+      await target.send(`🛒 ${interaction.user.displayName}님이 보낸 사야 할 것 (${items.length})\n${formatShoppingList(items)}`);
+    } catch {
+      noteFailure(interaction, "DM 전송 불가");
+      await interaction.editReply(`${target.displayName}님에게 DM을 보낼 수 없습니다. 서버 멤버의 DM 허용 설정을 확인해주세요.`);
+      return;
+    }
+    await interaction.editReply(`📨 ${target.displayName}님에게 ${items.length}개 항목을 보냈습니다.`);
+  } catch (err) {
+    noteFailure(interaction, err);
+    await interaction.editReply(`사야 할 것 전송에 실패했습니다: ${(err as Error).message}`);
+  }
+}
+
+/** `/봇재시작` — 봇 애플리케이션 소유자만 쓸 수 있다. 응답을 보낸 뒤 종료하면 launchd(KeepAlive)가 다시 띄운다. */
+async function handleRestartCommand(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  try {
+    const app = await interaction.client.application.fetch();
+    const ownerId = app.owner instanceof User ? app.owner.id : app.owner?.ownerId;
+    if (interaction.user.id !== ownerId) {
+      noteFailure(interaction, "소유자가 아님");
+      await interaction.editReply("봇 소유자만 사용할 수 있는 명령어입니다.");
+      return;
+    }
+    await interaction.editReply("🔄 봇을 재시작합니다. 잠시 후 다시 사용할 수 있습니다.");
+    console.log("[discord] /봇재시작 요청으로 프로세스를 종료합니다 (launchd가 재시작)");
+    process.exit(0);
+  } catch (err) {
+    noteFailure(interaction, err);
+    await interaction.editReply(`봇 재시작에 실패했습니다: ${(err as Error).message}`);
+  }
+}
+
 /** `/빈시간` — 기간(기본 오늘부터 7일) 안에서 09:00~18:00 중 일정이 없는 구간을 알려준다. */
 async function handleFreeTimeCommand(interaction: ChatInputCommandInteraction) {
   const periodText = interaction.options.getString("기간");
@@ -671,6 +808,37 @@ export const completeTaskCommand = new SlashCommandBuilder()
   .setDescription("자연어로 기존 할 일을 찾아 완료 처리합니다")
   .addStringOption((option) => option.setName("찾기").setDescription("예: 보고서").setRequired(true));
 
+export const addShoppingCommand = new SlashCommandBuilder()
+  .setName("살것추가")
+  .setDescription("사야 할 것을 목록에 추가합니다")
+  .addStringOption((option) =>
+    option.setName("내용").setDescription("쉼표로 여러 개 가능. 예: 우유, 계란, 두부").setRequired(true),
+  );
+
+export const shoppingListCommand = new SlashCommandBuilder()
+  .setName("살것목록")
+  .setDescription("사야 할 것 목록을 보여줍니다");
+
+export const editShoppingCommand = new SlashCommandBuilder()
+  .setName("살것수정")
+  .setDescription("사야 할 것 항목의 이름을 바꿉니다")
+  .addStringOption((option) => option.setName("찾기").setDescription("번호 또는 이름 일부. 예: 2, 계란").setRequired(true))
+  .addStringOption((option) => option.setName("변경").setDescription("새 이름. 예: 계란 30구").setRequired(true));
+
+export const deleteShoppingCommand = new SlashCommandBuilder()
+  .setName("살것삭제")
+  .setDescription("사야 할 것 항목을 지웁니다")
+  .addStringOption((option) => option.setName("찾기").setDescription("번호 또는 이름 일부. 예: 2, 계란").setRequired(true));
+
+export const sendShoppingCommand = new SlashCommandBuilder()
+  .setName("살것목록전송")
+  .setDescription("사야 할 것 목록을 선택한 사람에게 개인 메시지로 보냅니다")
+  .addUserOption((option) => option.setName("받는사람").setDescription("받을 서버 멤버").setRequired(true));
+
+export const restartCommand = new SlashCommandBuilder()
+  .setName("봇재시작")
+  .setDescription("봇을 재시작합니다 (봇 소유자 전용)");
+
 export const freeTimeCommand = new SlashCommandBuilder()
   .setName("빈시간")
   .setDescription("기간 안에서 일정이 없는 빈 시간(09:00~18:00)을 찾습니다")
@@ -705,6 +873,12 @@ export async function registerCommands(): Promise<void> {
       editTaskCommand.toJSON(),
       deleteTaskCommand.toJSON(),
       completeTaskCommand.toJSON(),
+      addShoppingCommand.toJSON(),
+      shoppingListCommand.toJSON(),
+      editShoppingCommand.toJSON(),
+      deleteShoppingCommand.toJSON(),
+      sendShoppingCommand.toJSON(),
+      restartCommand.toJSON(),
       freeTimeCommand.toJSON(),
       assistantCommand.toJSON(),
     ],
