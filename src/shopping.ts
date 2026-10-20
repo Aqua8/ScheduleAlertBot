@@ -47,6 +47,25 @@ export function findShoppingItem(items: string[], query: string): ShoppingMatch 
   return { index: matches[0] };
 }
 
+const DELETE_ALL_WORDS = ["전부", "모두", "전체"];
+
+export type ShoppingMatches = { indexes: number[] } | { error: string };
+
+/** "1, 3, 계란"처럼 쉼표/줄바꿈으로 구분된 여러 번호·이름을 찾는다. 하나라도 실패하면 첫 사유를 돌려준다. */
+export function findShoppingItems(items: string[], query: string): ShoppingMatches {
+  if (items.length === 0) return { error: "지울 항목이 없습니다." };
+  const queries = parseShoppingItems(query);
+  if (queries.length === 1 && DELETE_ALL_WORDS.includes(queries[0])) return { indexes: items.map((_, i) => i) };
+  if (queries.length === 0) return { error: "삭제할 항목을 입력해주세요." };
+  const indexes = new Set<number>();
+  for (const q of queries) {
+    const match = findShoppingItem(items, q);
+    if ("error" in match) return match;
+    indexes.add(match.index);
+  }
+  return { indexes: [...indexes].sort((a, b) => a - b) };
+}
+
 /** 번호를 붙인 목록 텍스트. indexes를 주면 그 항목만(원래 번호 유지) 보여준다. */
 export function formatShoppingList(items: string[], indexes = items.map((_, i) => i)): string {
   return indexes.map((i) => `${i + 1}. ${items[i]}`).join("\n");
