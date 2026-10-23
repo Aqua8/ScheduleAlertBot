@@ -27,6 +27,7 @@ import {
   formatEventList,
   formatEventCandidates,
   formatWeatherLine,
+  formatWeekWeather,
   formatTaskBrief,
   formatTaskCandidates,
   formatFreeSlots,
@@ -40,7 +41,7 @@ import { parseEventText, parseEventUpdate, parseSearchIntent, parseTaskText, par
 import { findMatchingEvents } from "../eventSearch.js";
 import { findMatchingTasks } from "../taskSearch.js";
 import { findFreeSlots, MAX_FREE_TIME_DAYS } from "../freeTime.js";
-import { getTodayWeather } from "../weather.js";
+import { getTodayWeather, getWeekWeather } from "../weather.js";
 import { findShoppingItem, formatShoppingList, loadShoppingList, parseShoppingItems, saveShoppingList } from "../shopping.js";
 
 let client: Client | null = null;
@@ -74,6 +75,8 @@ export function startDiscordClient(): Promise<Client> {
         return run(handleDeleteCommand);
       case "오늘날씨":
         return run(handleWeatherCommand);
+      case "주간날씨":
+        return run(handleWeekWeatherCommand);
       case "할일추가":
         return run(handleAddTaskCommand);
       case "할일수정":
@@ -130,6 +133,19 @@ async function handleWeatherCommand(interaction: ChatInputCommandInteraction) {
   try {
     const weather = await getTodayWeather();
     await interaction.editReply(formatWeatherLine(weather));
+  } catch (err) {
+    noteFailure(interaction, err);
+    await interaction.editReply(`날씨 정보를 가져오지 못했습니다: ${(err as Error).message}`);
+  }
+}
+
+/** `/주간날씨` — 오늘부터 7일치. 일부 구간만 실패하면 가져온 만큼 보여주고 사유를 덧붙인다. */
+async function handleWeekWeatherCommand(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  try {
+    const { days, warning } = await getWeekWeather();
+    const text = formatWeekWeather(days);
+    await interaction.editReply(warning ? `${text}\n\n⚠️ ${warning}` : text);
   } catch (err) {
     noteFailure(interaction, err);
     await interaction.editReply(`날씨 정보를 가져오지 못했습니다: ${(err as Error).message}`);
@@ -783,6 +799,10 @@ export const weatherCommand = new SlashCommandBuilder()
   .setName("오늘날씨")
   .setDescription("오늘 날씨와 우산/빨래 여부를 확인합니다");
 
+export const weekWeatherCommand = new SlashCommandBuilder()
+  .setName("주간날씨")
+  .setDescription("오늘부터 7일간의 날씨를 확인합니다");
+
 export const addTaskCommand = new SlashCommandBuilder()
   .setName("할일추가")
   .setDescription("자연어 문장으로 할 일을 추가합니다")
@@ -869,6 +889,7 @@ export async function registerCommands(): Promise<void> {
       editCommand.toJSON(),
       deleteCommand.toJSON(),
       weatherCommand.toJSON(),
+      weekWeatherCommand.toJSON(),
       addTaskCommand.toJSON(),
       editTaskCommand.toJSON(),
       deleteTaskCommand.toJSON(),
