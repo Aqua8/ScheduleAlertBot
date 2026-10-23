@@ -42,7 +42,7 @@ import { findMatchingEvents } from "../eventSearch.js";
 import { findMatchingTasks } from "../taskSearch.js";
 import { findFreeSlots, MAX_FREE_TIME_DAYS } from "../freeTime.js";
 import { getTodayWeather, getWeekWeather } from "../weather.js";
-import { findShoppingItem, formatShoppingList, loadShoppingList, parseShoppingItems, saveShoppingList } from "../shopping.js";
+import { findShoppingItem, findShoppingItems, formatShoppingList, loadShoppingList, parseShoppingItems, saveShoppingList } from "../shopping.js";
 
 let client: Client | null = null;
 let ready: Promise<Client> | null = null;
@@ -549,20 +549,21 @@ async function handleEditShoppingCommand(interaction: ChatInputCommandInteractio
   }
 }
 
-/** `/살것삭제` — 번호나 이름 일부로 항목 하나를 찾아 확인 없이 바로 지운다(다시 추가하면 되므로). */
+/** `/살것삭제` — 쉼표로 구분한 번호나 이름 일부로 항목 여러 개를 찾아 확인 없이 바로 지운다(다시 추가하면 되므로). 하나라도 못 찾으면 아무것도 지우지 않는다. */
 async function handleDeleteShoppingCommand(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply();
   try {
     const items = await loadShoppingList();
-    const match = findShoppingItem(items, interaction.options.getString("찾기", true));
+    const match = findShoppingItems(items, interaction.options.getString("찾기", true));
     if ("error" in match) {
       noteFailure(interaction, "대상을 찾지 못했거나 여러 개");
       await interaction.editReply(match.error);
       return;
     }
-    const [removed] = items.splice(match.index, 1);
-    await saveShoppingList(items);
-    await interaction.editReply(`🗑️ 삭제했습니다: ${removed}${items.length ? `\n${formatShoppingList(items)}` : "\n남은 항목이 없습니다."}`);
+    const removed = match.indexes.map((i) => items[i]);
+    const remaining = items.filter((_, i) => !match.indexes.includes(i));
+    await saveShoppingList(remaining);
+    await interaction.editReply(`🗑️ 삭제했습니다: ${removed.join(", ")}${remaining.length ? `\n${formatShoppingList(remaining)}` : "\n남은 항목이 없습니다."}`);
   } catch (err) {
     noteFailure(interaction, err);
     await interaction.editReply(`사야 할 것 삭제에 실패했습니다: ${(err as Error).message}`);
@@ -868,8 +869,8 @@ export const editShoppingCommand = new SlashCommandBuilder()
 
 export const deleteShoppingCommand = new SlashCommandBuilder()
   .setName("살것삭제")
-  .setDescription("사야 할 것 항목을 지웁니다")
-  .addStringOption((option) => option.setName("찾기").setDescription("번호 또는 이름 일부. 예: 2, 계란").setRequired(true));
+  .setDescription("사야 할 것 항목을 지웁니다 (여러 개 가능)")
+  .addStringOption((option) => option.setName("찾기").setDescription("번호 또는 이름 일부, 쉼표로 여러 개. 예: 2, 계란 / 전부·모두·전체는 모두 삭제").setRequired(true));
 
 export const sendShoppingCommand = new SlashCommandBuilder()
   .setName("살것목록전송")
