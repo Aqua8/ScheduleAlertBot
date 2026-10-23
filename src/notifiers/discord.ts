@@ -27,6 +27,7 @@ import {
   formatEventList,
   formatEventCandidates,
   formatWeatherLine,
+  formatWeekWeather,
   formatTaskBrief,
   formatTaskCandidates,
   formatFreeSlots,
@@ -40,7 +41,7 @@ import { parseEventText, parseEventUpdate, parseSearchIntent, parseTaskText, par
 import { findMatchingEvents } from "../eventSearch.js";
 import { findMatchingTasks } from "../taskSearch.js";
 import { findFreeSlots, MAX_FREE_TIME_DAYS } from "../freeTime.js";
-import { getTodayWeather } from "../weather.js";
+import { getTodayWeather, getWeekWeather } from "../weather.js";
 import { findShoppingItem, findShoppingItems, formatShoppingList, loadShoppingList, parseShoppingItems, saveShoppingList } from "../shopping.js";
 
 let client: Client | null = null;
@@ -74,6 +75,8 @@ export function startDiscordClient(): Promise<Client> {
         return run(handleDeleteCommand);
       case "오늘날씨":
         return run(handleWeatherCommand);
+      case "주간날씨":
+        return run(handleWeekWeatherCommand);
       case "할일추가":
         return run(handleAddTaskCommand);
       case "할일수정":
@@ -94,6 +97,8 @@ export function startDiscordClient(): Promise<Client> {
         return run(handleSendShoppingCommand);
       case "봇재시작":
         return run(handleRestartCommand);
+      case "명령어갱신":
+        return run(handleRefreshCommandsCommand);
       case "빈시간":
         return run(handleFreeTimeCommand);
       case "비서":
@@ -130,6 +135,19 @@ async function handleWeatherCommand(interaction: ChatInputCommandInteraction) {
   try {
     const weather = await getTodayWeather();
     await interaction.editReply(formatWeatherLine(weather));
+  } catch (err) {
+    noteFailure(interaction, err);
+    await interaction.editReply(`날씨 정보를 가져오지 못했습니다: ${(err as Error).message}`);
+  }
+}
+
+/** `/주간날씨` — 오늘부터 7일치. 일부 구간만 실패하면 가져온 만큼 보여주고 사유를 덧붙인다. */
+async function handleWeekWeatherCommand(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  try {
+    const { days, warning } = await getWeekWeather();
+    const text = formatWeekWeather(days);
+    await interaction.editReply(warning ? `${text}\n\n⚠️ ${warning}` : text);
   } catch (err) {
     noteFailure(interaction, err);
     await interaction.editReply(`날씨 정보를 가져오지 못했습니다: ${(err as Error).message}`);
@@ -602,6 +620,25 @@ async function handleRestartCommand(interaction: ChatInputCommandInteraction) {
   }
 }
 
+/** `/명령어갱신` — 슬래시 명령어 목록을 Discord에 다시 등록한다(`npm run register-commands`와 같은 동작). 실행 중인 코드의 목록이 기준이라, 코드를 바꿨다면 먼저 `/봇재시작`이 필요하다. */
+async function handleRefreshCommandsCommand(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  try {
+    const app = await interaction.client.application.fetch();
+    const ownerId = app.owner instanceof User ? app.owner.id : app.owner?.ownerId;
+    if (interaction.user.id !== ownerId) {
+      noteFailure(interaction, "소유자가 아님");
+      await interaction.editReply("봇 소유자만 사용할 수 있는 명령어입니다.");
+      return;
+    }
+    await registerCommands();
+    await interaction.editReply("✅ 슬래시 명령어를 다시 등록했습니다. 반영까지 잠시 걸릴 수 있습니다.");
+  } catch (err) {
+    noteFailure(interaction, err);
+    await interaction.editReply(`명령어 갱신에 실패했습니다: ${(err as Error).message}`);
+  }
+}
+
 /** `/빈시간` — 기간(기본 오늘부터 7일) 안에서 09:00~18:00 중 일정이 없는 구간을 알려준다. */
 async function handleFreeTimeCommand(interaction: ChatInputCommandInteraction) {
   const periodText = interaction.options.getString("기간");
@@ -784,6 +821,10 @@ export const weatherCommand = new SlashCommandBuilder()
   .setName("오늘날씨")
   .setDescription("오늘 날씨와 우산/빨래 여부를 확인합니다");
 
+export const weekWeatherCommand = new SlashCommandBuilder()
+  .setName("주간날씨")
+  .setDescription("오늘부터 7일간의 날씨를 확인합니다");
+
 export const addTaskCommand = new SlashCommandBuilder()
   .setName("할일추가")
   .setDescription("자연어 문장으로 할 일을 추가합니다")
@@ -840,6 +881,10 @@ export const restartCommand = new SlashCommandBuilder()
   .setName("봇재시작")
   .setDescription("봇을 재시작합니다 (봇 소유자 전용)");
 
+export const refreshCommandsCommand = new SlashCommandBuilder()
+  .setName("명령어갱신")
+  .setDescription("슬래시 명령어 목록을 Discord에 다시 등록합니다 (봇 소유자 전용)");
+
 export const freeTimeCommand = new SlashCommandBuilder()
   .setName("빈시간")
   .setDescription("기간 안에서 일정이 없는 빈 시간(09:00~18:00)을 찾습니다")
@@ -870,6 +915,7 @@ export async function registerCommands(): Promise<void> {
       editCommand.toJSON(),
       deleteCommand.toJSON(),
       weatherCommand.toJSON(),
+      weekWeatherCommand.toJSON(),
       addTaskCommand.toJSON(),
       editTaskCommand.toJSON(),
       deleteTaskCommand.toJSON(),
@@ -880,6 +926,7 @@ export async function registerCommands(): Promise<void> {
       deleteShoppingCommand.toJSON(),
       sendShoppingCommand.toJSON(),
       restartCommand.toJSON(),
+      refreshCommandsCommand.toJSON(),
       freeTimeCommand.toJSON(),
       assistantCommand.toJSON(),
     ],

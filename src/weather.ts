@@ -189,3 +189,125 @@ function summarizeDay(items: ForecastItem[], dateKey: string): WeatherSummary {
     laundryOk: !hasPrecipitation && maxPop < config.LAUNDRY_POP_THRESHOLD,
   };
 }
+
+// 중기예보(4~10일 뒤)는 단기예보와 별개 서비스다. 기온(getMidTa)과 날씨/강수확률(getMidLandFcst)이
+// 따로 오고, 06시·18시에 발표된다. 필드는 발표일 기준 N일 뒤 값이다(예: taMin4, rnSt4Am, wf4Pm).
+const KMA_MID_BASE_URL = "https://apihub.kma.go.kr/api/typ02/openApi/MidFcstInfoService";
+
+type MidItem = Record<string, string | number | undefined>;
+
+export interface DayWeather {
+  dateKey: string;
+  /** 해당 날짜 예보가 없으면 null */
+  summary: WeatherSummary | null;
+}
+
+/** 중기예보 응답(기온 1건 + 육상 1건)을 발표일 기준 N일 뒤(4~10) 날짜별 요약으로 바꾼다. */
+export function buildMidDays(
+  ta: MidItem,
+  land: MidItem,
+  baseDateKey: string,
+  thresholds: { umbrella: number; laundry: number },
+): Map<string, WeatherSummary> {
+  const num = (v: string | number | undefined) => (v === undefined || v === "" ? null : Number(v));
+  const days = new Map<string, WeatherSummary>();
+  for (let n = 4; n <= 10; n++) {
+    // 4~7일은 오전/오후로 나뉘고 8일부터는 하루 한 값이다.
+    const sides = n <= 7 ? ["Am", "Pm"] : [""];
+    const pops = sides.map((s) => num(land[`rnSt${n}${s}`])).filter((v): v is number => v !== null);
+    const texts = sides.map((s) => String(land[`wf${n}${s}`] ?? ""));
+    const minTemp = num(ta[`taMin${n}`]);
+    const maxTemp = num(ta[`taMax${n}`]);
+    if (pops.length === 0 && minTemp === null && maxTemp === null) continue;
+
+    const maxPop = pops.length > 0 ? Math.max(...pops) : 0;
+    const hasPrecipitation = texts.some((t) => /비|눈|소나기/.test(t));
+    days.set(addDaysToDateKey(baseDateKey, n), {
+      minTemp,
+      maxTemp,
+      maxPop,
+      hasPrecipitation,
+      precipitationPeriods: [], // 중기예보에는 시간대 정보가 없다.
+      umbrella: hasPrecipitation || maxPop >= thresholds.umbrella,
+      laundryOk: !hasPrecipitation && maxPop < thresholds.laundry,
+    });
+  }
+  return days;
+}
+
+async function fetchMidItem(endpoint: string, regId: string, tmFc: string): Promise<MidItem> {
+  const config = loadConfig();
+  requireWeatherConfig(config);
+
+  const url = new URL(`${KMA_MID_BASE_URL}/${endpoint}`);
+  url.searchParams.set("authKey", config.KMA_SERVICE_KEY);
+  url.searchParams.set("pageNo", "1");
+  url.searchParams.set("numOfRows", "10");
+  url.searchParams.set("dataType", "JSON");
+  url.searchParams.set("regId", regId);
+  url.searchParams.set("tmFc", tmFc);
+
+  const res = await fetch(url);
+  const json = (await res.json()) as {
+    response?: { header?: { resultCode?: string; resultMsg?: string }; body?: { items?: { item?: MidItem[] } } };
+    result?: { message?: string };
+  };
+  const header = json.response?.header;
+  const item = json.response?.body?.items?.item?.[0];
+  if (!header || header.resultCode !== "00" || !item) {
+    throw new Error(header?.resultMsg ?? json.result?.message ?? `HTTP ${res.status}`);
+  }
+  return item;
+}
+
+/** 발표 시각 후보(오늘 18시 → 오늘 06시 → 어제 18시)를 순서대로 시도해 처음 성공한 중기예보를 날짜별로 돌려준다. */
+async function fetchMidDays(todayDateKey: string): Promise<Map<string, WeatherSummary>> {
+  const config = loadConfig();
+  const yesterdayKey = addDaysToDateKey(todayDateKey, -1);
+  const attempts: [string, string][] = [
+    [todayDateKey, "1800"],
+    [todayDateKey, "0600"],
+    [yesterdayKey, "1800"],
+  ];
+  let lastError: unknown;
+  for (const [dateKey, time] of attempts) {
+    const tmFc = `${dateKey.replace(/-/g, "")}${time}`;
+    try {
+      const [ta, land] = await Promise.all([
+        fetchMidItem("getMidTa", config.WEATHER_MID_TA_REGID, tmFc),
+        fetchMidItem("getMidLandFcst", config.WEATHER_MID_LAND_REGID, tmFc),
+      ]);
+      return buildMidDays(ta, land, dateKey, {
+        umbrella: config.UMBRELLA_POP_THRESHOLD,
+        laundry: config.LAUNDRY_POP_THRESHOLD,
+      });
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw new Error(`기상청 중기예보를 가져오지 못했습니다: ${(lastError as Error)?.message ?? "알 수 없는 오류"}`);
+}
+
+/**
+ * 오늘부터 7일치 날씨. 오늘~모레는 단기예보, 그 뒤는 중기예보를 쓴다.
+ * 두 구간 중 하나만 실패해도 나머지는 돌려주고, 실패한 쪽 사유를 warning에 담는다. 둘 다 실패하면 던진다.
+ */
+export async function getWeekWeather(): Promise<{ days: DayWeather[]; warning?: string }> {
+  const { dateKey } = getTodayRange();
+  const [shortRes, midRes] = await Promise.allSettled([fetchTodayForecastItems(dateKey), fetchMidDays(dateKey)]);
+  if (shortRes.status === "rejected" && midRes.status === "rejected") throw shortRes.reason;
+
+  const warnings: string[] = [];
+  const shortItems = shortRes.status === "fulfilled" ? shortRes.value : [];
+  const midDays = midRes.status === "fulfilled" ? midRes.value : new Map<string, WeatherSummary>();
+  if (shortRes.status === "rejected") warnings.push(`단기예보(오늘~모레) 조회 실패: ${(shortRes.reason as Error).message}`);
+  if (midRes.status === "rejected") warnings.push(`중기예보(4일 이후) 조회 실패: ${(midRes.reason as Error).message}`);
+
+  const days: DayWeather[] = [];
+  for (let i = 0; i < 7; i++) {
+    const day = addDaysToDateKey(dateKey, i);
+    const hasShort = shortItems.some((it) => it.fcstDate === day.replace(/-/g, ""));
+    days.push({ dateKey: day, summary: hasShort ? summarizeDay(shortItems, day) : (midDays.get(day) ?? null) });
+  }
+  return { days, warning: warnings.length > 0 ? warnings.join("\n") : undefined };
+}

@@ -73,6 +73,19 @@ export function formatWeatherLine(weather: WeatherSummary, dayLabel = "오늘"):
   return `${icon} ${dayLabel} 날씨: ${tempPart}, 강수확률 최대 ${weather.maxPop}%${periodLine}\n${umbrellaText} · ${laundryText}`;
 }
 
+/** 주간날씨: 날짜별 한 줄(기온, 최대 강수확률, 우산). 예보가 없는 날은 "예보 없음". */
+export function formatWeekWeather(days: { dateKey: string; summary: WeatherSummary | null }[]): string {
+  const tz = loadConfig().TIMEZONE;
+  const lines = days.map(({ dateKey, summary }) => {
+    const header = formatDateHeader(dateKey, tz);
+    if (!summary) return `${header} 예보 없음`;
+    const icon = summary.hasPrecipitation ? "🌧️" : summary.maxPop >= 50 ? "🌦️" : "🌤️";
+    const temp = summary.minTemp !== null && summary.maxTemp !== null ? `${summary.minTemp}°~${summary.maxTemp}°` : "기온 정보 없음";
+    return `${header} ${icon} ${temp} · 강수 ${summary.maxPop}%${summary.umbrella ? " ☔" : ""}`;
+  });
+  return `📅 주간 날씨\n${lines.join("\n")}`;
+}
+
 /** 06:00 아침 발송용 텍스트 (Discord 메시지 본문 / 콘솔 출력 공용). weather를 주면 상단에 날씨 안내를 덧붙인다. */
 export function formatDailySummary(summary: DailySummary, weather?: WeatherSummary): string {
   const config = loadConfig();

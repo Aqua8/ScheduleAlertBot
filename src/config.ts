@@ -27,6 +27,9 @@ const schema = z.object({
   KMA_SERVICE_KEY: z.string().optional(),
   WEATHER_NX: z.coerce.number().optional(),
   WEATHER_NY: z.coerce.number().optional(),
+  // 주간날씨의 4일 이후 구간(중기예보)은 격자 대신 지역코드를 쓴다. 기본값은 인천.
+  WEATHER_MID_TA_REGID: z.string().default("11B20201"),
+  WEATHER_MID_LAND_REGID: z.string().default("11B00000"),
   UMBRELLA_POP_THRESHOLD: z.coerce.number().default(50),
   LAUNDRY_POP_THRESHOLD: z.coerce.number().default(30),
 });
